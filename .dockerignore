@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Data (mounted as volume)
+data/
+
+# Docs
+docs/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+*.md

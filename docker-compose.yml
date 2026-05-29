@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  etl-app:
+    build: .
+    container_name: hl-quote-etl
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - etl_data:/app/data
+    environment:
+      # ============================================
+      # SQL Server 数据库配置
+      # ============================================
+      DB_SERVER: 192.168.0.9
+      DB_NAME: HL_QS
+      DB_USER: EG264021
+      DB_PASSWORD: clj264021.
+
+      # ============================================
+      # DeepSeek (Volcengine ARK)
+      # ============================================
+      DEEPSEEK_API_KEY: ark-2a12cde3-4577-4399-a804-3cb61e7d635a-1f31f
+      DEEPSEEK_BASE_URL: https://ark.cn-beijing.volces.com/api/v3
+      DEEPSEEK_MODEL: ep-20260527115853-rw5f9
+
+      # ============================================
+      # JWT 认证
+      # ============================================
+      JWT_SECRET: a362ed3177c1800118da4f8240482a88b02624ddd200300c706a9bfd2fc42265
+      JWT_EXPIRE_HOURS: 72
+
+      # ============================================
+      # LLM 并发控制
+      # ============================================
+      LLM_MAX_CONCURRENCY: 5
+
+volumes:
+  etl_data:

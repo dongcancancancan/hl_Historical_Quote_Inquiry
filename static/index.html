@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>报价单 ETL 入库系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 font-sans min-h-screen">
+    <div class="max-w-2xl mx-auto py-12 px-4">
+        <!-- 用户信息栏 -->
+        <div class="flex items-center justify-between mb-8">
+            <h1 class="text-2xl font-bold text-gray-800">报价单 ETL 入库</h1>
+            <div class="flex items-center gap-4 text-sm text-gray-600">
+                <span id="currentTenant" class="bg-blue-50 text-blue-700 px-3 py-1 rounded"></span>
+                <span id="currentUser" class="bg-green-50 text-green-700 px-3 py-1 rounded"></span>
+                <button onclick="logout()" class="text-red-500 hover:text-red-700 underline">退出</button>
+            </div>
+        </div>
+
+        <!-- 上传区域 -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-lg font-semibold mb-4 text-blue-600">上传成本分析表</h2>
+            <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分多个 Sheet 中的报价单并入库。</p>
+            <form id="uploadForm" class="space-y-4">
+                <input type="file" id="excelFile" accept=".xlsx, .xls" class="block w-full text-sm text-gray-500
+                    file:mr-4 file:py-2 file:px-4
+                    file:rounded-full file:border-0
+                    file:text-sm file:font-semibold
+                    file:bg-blue-50 file:text-blue-700
+                    hover:file:bg-blue-100
+                "/>
+                <button type="submit" id="uploadBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-200 text-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                    上传并清洗入库
+                </button>
+            </form>
+        </div>
+
+        <!-- 进度区域 -->
+        <div id="progressCard" class="bg-white rounded-lg shadow-md p-6 mb-6 hidden">
+            <h2 class="text-lg font-semibold mb-4 text-gray-700">处理进度</h2>
+            <div id="progressContent" class="space-y-3"></div>
+        </div>
+    </div>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        const tenantName = sessionStorage.getItem('tenantName');
+        const userName = sessionStorage.getItem('userName');
+        if (!token) {
+            window.location.href = '/static/login.html';
+        }
+
+        document.getElementById('currentTenant').textContent = '部门: ' + tenantName;
+        document.getElementById('currentUser').textContent = '用户: ' + userName;
+
+        function logout() {
+            sessionStorage.clear();
+            window.location.href = '/static/login.html';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // 将常见英文错误转为中文
+        function toChineseError(msg) {
+            if (!msg) return '未知错误';
+            const m = msg.toLowerCase();
+            if (m.includes('connection') && m.includes('timeout')) return '连接超时，请检查网络后重试';
+            if (m.includes('connection') && m.includes('refused')) return '服务未启动，请联系管理员';
+            if (m.includes('network')) return '网络异常，请检查网络连接';
+            if (m.includes('timeout')) return '请求超时，AI 服务响应过慢，请稍后重试';
+            if (m.includes('rate limit') || m.includes('too many')) return '请求过于频繁，请稍后重试';
+            if (m.includes('unauthorized') || m.includes('401')) return '登录已过期，请重新登录';
+            if (m.includes('forbidden') || m.includes('403')) return '无权限执行此操作';
+            if (m.includes('not found') || m.includes('404')) return '服务地址错误，请联系管理员';
+            if (m.includes('413') || m.includes('entity too large')) return '文件过大，请压缩后重试（最大 50MB）';
+            if (m.includes('500') || m.includes('internal server')) return '服务器内部错误，请稍后重试';
+            if (m.includes('json') && (m.includes('decode') || m.includes('parse'))) return 'AI 返回格式异常，请重试';
+            if (m.includes('llm returned empty')) return 'AI 未能识别该报价单，请检查 Excel 内容';
+            if (m.includes('excel') || m.includes('xlsx') || m.includes('openpyxl')) return 'Excel 文件格式异常，请检查文件是否损坏';
+            return msg;
+        }
+
+        // 上传处理 (SSE 流式)
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileInput = document.getElementById('excelFile');
+            const uploadBtn = document.getElementById('uploadBtn');
+            const progressCard = document.getElementById('progressCard');
+            const progressContent = document.getElementById('progressContent');
+
+            if (!fileInput.files.length) {
+                alert('请选择文件');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '正在处理...';
+            progressCard.classList.remove('hidden');
+            progressContent.innerHTML =
+                '<div class="flex items-center gap-2 text-blue-600">' +
+                '<svg class="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>' +
+                '正在扫描 Excel 文件...</div>';
+
+            try {
+                const response = await fetch('/api/v1/etl/upload_excel', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.detail || '上传失败');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const event = JSON.parse(line.slice(6));
+                        handleEvent(event, progressContent);
+                    }
+                }
+            } catch (err) {
+                const friendlyMsg = toChineseError(err.message);
+                progressContent.innerHTML = '<div class="text-red-600 font-semibold">✘ ' + escapeHtml(friendlyMsg) + '</div>';
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '上传并清洗入库';
+                fileInput.value = '';
+            }
+        });
+
+        function handleEvent(event, container) {
+            switch (event.event) {
+                case 'scanned':
+                    if (event.total === 0) {
+                        container.innerHTML = '<div class="text-yellow-600">未识别到任何成本分析表，请检查文件内容。</div>';
+                    } else {
+                        container.innerHTML =
+                            '<div class="text-blue-700 font-semibold text-lg">共识别到 ' + event.total + ' 个成本分析表</div>' +
+                            '<div class="text-sm text-gray-500">扫描耗时 ' + event.scan_time + ' 秒，开始并行解析 (并发数: ' + event.total + '→)...</div>' +
+                            '<div class="w-full bg-gray-200 rounded-full h-4 mt-2"><div id="progressBar" class="bg-blue-600 h-4 rounded-full transition-all duration-300" style="width: 0%"></div></div>' +
+                            '<div id="progressText" class="text-sm text-gray-600 mt-1"></div>' +
+                            '<div id="progressList" class="max-h-60 overflow-y-auto space-y-1 mt-2 text-sm font-mono"></div>';
+                    }
+                    break;
+
+                case 'progress': {
+                    const bar = document.getElementById('progressBar');
+                    const text = document.getElementById('progressText');
+                    const list = document.getElementById('progressList');
+                    const pct = Math.round(event.current / event.total * 100);
+                    if (bar) bar.style.width = pct + '%';
+                    if (text) text.textContent = '正在解析第 ' + event.current + '/' + event.total + ' 个';
+
+                    if (list) {
+                        const statusIcon = event.error ? '✘' : '✔';
+                        const statusColor = event.error ? 'text-red-500' : 'text-green-500';
+                        const line = document.createElement('div');
+                        line.className = statusColor;
+                        line.textContent = statusIcon + ' [' + event.current + '/' + event.total + '] ' + event.quotation_code + ' (' + event.llm_time + 's)';
+                        if (event.error) {
+                            line.textContent += ' — ' + toChineseError(event.error);
+                        }
+                        list.prepend(line);
+                    }
+                    break;
+                }
+
+                case 'db_write':
+                    container.innerHTML += '<div class="text-orange-600 font-semibold mt-2">' + event.message + '</div>';
+                    break;
+
+                case 'complete': {
+                    const line = document.createElement('div');
+                    line.className = 'text-green-700 font-semibold text-lg mt-3 border-t pt-3';
+                    line.textContent = '入库完成！成功 ' + event.processed + ' 个报价单';
+                    if (event.llm_errors > 0) {
+                        line.textContent += '，LLM 解析失败 ' + event.llm_errors + ' 个';
+                    }
+                    if (event.db_errors > 0) {
+                        line.textContent += '，DB 写入失败 ' + event.db_errors + ' 个';
+                    }
+                    if (event.db_time !== undefined) {
+                        line.textContent += '（DB 写入耗时 ' + event.db_time + 's）';
+                    }
+                    container.appendChild(line);
+                    break;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
