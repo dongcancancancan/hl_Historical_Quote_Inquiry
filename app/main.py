@@ -6,7 +6,7 @@ from app.core.config import settings
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="报价单 ETL 入库系统",
+    description="成本分析表 ETL 入库系统",
     version="1.0.0"
 )
 
