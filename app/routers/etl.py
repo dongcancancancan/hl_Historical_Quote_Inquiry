@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.auth import UserContext, get_current_user
-from app.services.etl_service import scan_quotations, process_excel_streaming
+from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,3 +92,13 @@ async def upload_and_process_excel(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/history")
+def upload_history(
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """返回当前租户最近的上传历史"""
+    history = get_upload_history(db, user.tenant_id, limit=20)
+    return {"history": history}

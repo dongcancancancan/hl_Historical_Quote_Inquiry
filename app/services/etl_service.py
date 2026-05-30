@@ -529,6 +529,51 @@ async def process_excel_streaming(
             logger.warning(f"Cancelled {cancelled_count} pending LLM tasks due to disconnect")
 
 
+def get_upload_history(db: Session, tenant_id: str, limit: int = 20):
+    """查询当前租户的上传历史（按文件分组）"""
+    from sqlalchemy import func
+
+    groups = (
+        db.query(
+            QuotationMain.original_file_path,
+            QuotationMain.creator,
+            func.min(QuotationMain.create_time).label("upload_time"),
+            func.count(QuotationMain.id).label("quotation_count"),
+        )
+        .filter(
+            QuotationMain.tenant_id == tenant_id,
+            QuotationMain.original_file_path.isnot(None),
+        )
+        .group_by(QuotationMain.original_file_path, QuotationMain.creator)
+        .order_by(func.min(QuotationMain.create_time).desc())
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+    for path, creator, upload_time, count in groups:
+        codes = [
+            r[0]
+            for r in db.query(QuotationMain.quotation_code)
+            .filter(
+                QuotationMain.original_file_path == path,
+                QuotationMain.tenant_id == tenant_id,
+            )
+            .order_by(QuotationMain.create_time)
+            .all()
+        ]
+        filename = os.path.basename(path) if path else "未知文件"
+        result.append({
+            "filename": filename,
+            "upload_time": upload_time.isoformat() if upload_time else None,
+            "upload_user": creator,
+            "quotation_count": count,
+            "quotations": codes,
+        })
+
+    return result
+
+
 # 保留同步版本，兼容旧的调用方式
 def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, username: str) -> dict:
     """同步版：保存文件 + 扫描 + 串行 LLM + 写入（兼容旧接口）"""
