@@ -21,7 +21,7 @@
         <!-- 上传区域 -->
         <div class="bg-white rounded-lg shadow-md p-6 mb-6">
             <h2 class="text-lg font-semibold mb-4 text-blue-600">上传成本分析表</h2>
-            <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分多个 Sheet 中的报价单并入库。</p>
+            <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分多个 Sheet 中的成本分析表并入库。</p>
             <form id="uploadForm" class="space-y-4">
                 <input type="file" id="excelFile" accept=".xlsx, .xls" class="block w-full text-sm text-gray-500
                     file:mr-4 file:py-2 file:px-4
@@ -186,6 +186,21 @@
                     break;
                 }
 
+                case 'skipped': {
+                    const list = document.getElementById('progressList');
+                    if (list) {
+                        const isBatchDup = event.reason === 'batch_dup';
+                        const icon = isBatchDup ? '⚠' : '⛔';
+                        const colorClass = isBatchDup ? 'text-yellow-600' : 'text-orange-500';
+                        const label = isBatchDup ? '批次内重复' : '历史已存在';
+                        const line = document.createElement('div');
+                        line.className = colorClass + ' font-mono';
+                        line.textContent = icon + ' 跳过: ' + event.quotation_code + ' — ' + label;
+                        list.prepend(line);
+                    }
+                    break;
+                }
+
                 case 'db_write':
                     container.innerHTML += '<div class="text-orange-600 font-semibold mt-2">' + event.message + '</div>';
                     break;
@@ -196,6 +211,12 @@
                     line.textContent = '入库完成！成功 ' + event.processed + ' 个报价单';
                     if (event.llm_errors > 0) {
                         line.textContent += '，LLM 解析失败 ' + event.llm_errors + ' 个';
+                    }
+                    if (event.dup_within_batch > 0) {
+                        line.textContent += '，批次内重复跳过 ' + event.dup_within_batch + ' 个';
+                    }
+                    if (event.db_duplicates > 0) {
+                        line.textContent += '，已存在跳过 ' + event.db_duplicates + ' 个';
                     }
                     if (event.db_errors > 0) {
                         line.textContent += '，DB 写入失败 ' + event.db_errors + ' 个';

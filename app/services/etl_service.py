@@ -37,8 +37,10 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 3. 从详细规格中提取出所有胶料料号（常见前缀: EX, EE, D, V, C, PA），存入 material_codes 数组。
 4. 从品名规格中提取出线径或截面积数值（如 50mm2, 2.5mm），存入 cross_section，只保留数字和单位。
 5. 将百分比转换为小数（如 2% 转换为 0.02）。如果本身是小数则保持不变。
-6. 从品名规格中提取编织率（如 "95%编织" → 0.95、"85%编" → 0.85），存入 braiding_rate。
-7. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
+6. 从表头区的"编织率(%)"列提取编织率百分比值，转换为小数（如 95 → 0.95、85% → 0.85），存入 braiding_rate。如果该列为空，再尝试从品名规格中提取（如 "95%编织"）。
+7. 从表头区提取"地址"字段（通常为"xx市"），存入 address。
+8. 核心表格中"物料编码"列的值提取到每个 material 的 material_code 字段，有的填、没有的用 null。
+9. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
 
 【表头区数据】
 {header_text}
@@ -50,6 +52,7 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 {{
     "quotation_no": "编号",
     "customer": "客户",
+    "address": "地址",
     "date_val": "分析日期 (YYYY-MM-DD)",
     "structure": "结构",
     "product_spec": "品名规格",
@@ -60,6 +63,7 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
         {{
             "process_name": "制程名称",
             "spec_detail": "详细规格",
+            "material_code": "物料编码或null",
             "unit_usage": 浮点数 (单位用量),
             "unit_price": 浮点数 (单价),
             "material_amount": 浮点数 (材料金额)
@@ -117,11 +121,20 @@ class QuotationBlock:
 
 
 def _parse_braiding_rate(product_spec: str) -> float:
+    """从品名规格中提取编织率，返回小数形式（95% → 0.95）"""
     m = _BRAIDING_RE.search(product_spec or "")
     if not m:
         return 0.0
     val = float(m.group(1))
     return val / 100 if val > 1 else val
+
+
+def _normalize_braiding_rate(val) -> float:
+    """统一编织率为 0-1 小数：如果 >1 则视为百分比除以 100"""
+    v = _safe_numeric(val, scale=4)
+    if v > 1:
+        v = round(v / 100, 4)
+    return v
 
 
 def _safe_numeric(val, scale: int = 4) -> float:
@@ -221,7 +234,7 @@ def _enrich_extracted(data: dict, product_spec: str) -> None:
     if _safe_numeric(data.get("braiding_rate"), scale=4) == 0.0:
         data["braiding_rate"] = _parse_braiding_rate(product_spec)
 
-    # 材料料号兜底
+    # 材料料号兜底：从规格中扫描
     existing_codes = [c.upper() for c in data.get("material_codes", [])]
     for mat in data.get("materials", []):
         spec = mat.get("spec_detail", "")
@@ -229,7 +242,21 @@ def _enrich_extracted(data: dict, product_spec: str) -> None:
             for code in _mat_code_pattern.findall(str(spec)):
                 if code.upper() not in existing_codes:
                     existing_codes.append(code.upper())
-                    data["material_codes"].append(code)
+                    data.setdefault("material_codes", []).append(code.upper())
+
+        # 物料编码兜底：如果 LLM 没提取到 material_code，从规格中正则提取
+        if not mat.get("material_code"):
+            found = _mat_code_pattern.findall(str(mat.get("spec_detail", "")))
+            if found:
+                mat["material_code"] = found[0]
+
+
+def _quotation_exists(db: Session, quotation_code: str, tenant_id: str) -> bool:
+    """检查同租户下成本分析号是否已存在"""
+    return db.query(QuotationMain).filter(
+        QuotationMain.quotation_code == quotation_code,
+        QuotationMain.tenant_id == tenant_id,
+    ).first() is not None
 
 
 def _write_one_quotation(
@@ -239,14 +266,20 @@ def _write_one_quotation(
     username: str,
     saved_path: str,
 ) -> str:
-    """将单条 LLM 提取结果写入数据库，返回 quotation_code"""
+    """将单条 LLM 提取结果写入数据库，返回 quotation_code。
+    如果成本分析号已存在则跳过，返回空字符串。"""
     quotation_code = data.get("quotation_no") or f"AUTO-{uuid.uuid4().hex[:6]}"
     product_spec = data.get("product_spec") or ""
+
+    # 唯一性校验：同租户下已存在则跳过
+    if _quotation_exists(db, quotation_code, tenant_id):
+        logger.info(f"[{quotation_code}] 成本分析号已存在，跳过")
+        return ""
 
     _enrich_extracted(data, product_spec)
 
     cost_data = data.get("cost_summary", {})
-    braiding_rate = _safe_numeric(data.get("braiding_rate"), scale=4)
+    braiding_rate = _normalize_braiding_rate(data.get("braiding_rate"))
 
     # 日期处理
     date_val = data.get("date_val")
@@ -264,19 +297,11 @@ def _write_one_quotation(
         "customer_keyword": (data.get("customer") or "").split()[0] if data.get("customer") else None,
     }, ensure_ascii=False)
 
-    # Upsert: 同租户下同名报价单先删后插
-    existing = db.query(QuotationMain).filter(
-        QuotationMain.quotation_code == quotation_code,
-        QuotationMain.tenant_id == tenant_id,
-    ).first()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
     new_main = QuotationMain(
         tenant_id=tenant_id,
         quotation_code=quotation_code,
         customer_name=data.get("customer") or "",
+        customer_address=data.get("address") or "",
         analysis_date=parsed_date,
         structure=data.get("structure") or "",
         product_spec=product_spec,
@@ -312,6 +337,8 @@ def _write_one_quotation(
     db.flush()
 
     for mat in data.get("materials", []):
+        raw_code = mat.get("material_code")
+        material_code = str(raw_code).strip() if raw_code and str(raw_code).strip().lower() != "null" else ""
         db.add(QuotationMaterial(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
@@ -320,6 +347,7 @@ def _write_one_quotation(
             unit_usage=_safe_numeric(mat.get("unit_usage")),
             unit_price=_safe_numeric(mat.get("unit_price")),
             material_amount=_safe_numeric(mat.get("material_amount")),
+            process_code=material_code,
             creator=username,
             deleted=False,
         ))
@@ -351,7 +379,7 @@ async def process_excel_streaming(
     tenant_id: str,
     username: str,
 ):
-    """阶段2+3：并行调用 LLM 提取，实时产出 SSE 进度事件，最后写库"""
+    """阶段2+3：并行调用 LLM 提取，实时产出 SSE 进度事件，最后写库（含去重）"""
     total = len(blocks)
 
     if total == 0:
@@ -411,20 +439,60 @@ async def process_excel_streaming(
                 "error": result["error"],
             }
 
-        # --- 阶段3: 写入数据库 ---
-        yield {"event": "db_write", "message": f"LLM 解析完成，正在写入数据库 (成功 {completed - errors}/{total})..."}
-
-        t_db_start = time.time()
+        # --- 阶段3: 去重 + 写入数据库 ---
         results.sort(key=lambda r: r["index"])
-        db_success = 0
 
+        # 批次内去重：同一个成本分析号在一个 Excel 中出现多次，只保留第一个
+        seen_codes: set[str] = set()
+        dup_within_batch = 0
+        deduped_results = []
         for r in results:
             if r["data"] is None:
+                deduped_results.append(r)
+                continue
+            code = (r.get("quotation_code") or "").strip()
+            if code and code in seen_codes:
+                dup_within_batch += 1
+                logger.warning(f"[{code}] 批次内重复，跳过")
+                r["dup_skipped"] = True
+                yield {
+                    "event": "skipped",
+                    "quotation_code": code,
+                    "reason": "batch_dup",
+                    "message": f"批次内重复：成本分析号 {code} 在本文件中已出现，保留第一个",
+                }
+            else:
+                if code:
+                    seen_codes.add(code)
+                deduped_results.append(r)
+
+        db_ready = sum(1 for r in deduped_results if r["data"] is not None and not r.get("dup_skipped"))
+        yield {
+            "event": "db_write",
+            "message": f"LLM 解析完成，正在写入数据库 (有效 {db_ready}/{total}，批次内重复 {dup_within_batch})...",
+        }
+
+        t_db_start = time.time()
+        db_success = 0
+        db_duplicates = 0
+
+        for r in deduped_results:
+            if r["data"] is None or r.get("dup_skipped"):
                 continue
             try:
                 code = _write_one_quotation(db, r["data"], tenant_id, username, saved_path)
-                db_success += 1
-                logger.info(f"[{code}] DB 写入完成")
+                if code:
+                    db_success += 1
+                    logger.info(f"[{code}] DB 写入完成")
+                else:
+                    db_duplicates += 1
+                    logger.info(f"[{r['quotation_code']}] DB 中已存在，跳过")
+                    yield {
+                        "event": "skipped",
+                        "quotation_code": r["quotation_code"],
+                        "reason": "db_dup",
+                        "message": f"历史重复：成本分析号 {r['quotation_code']} 已在数据库中，跳过",
+                    }
             except Exception as e:
                 logger.error(f"[{r['quotation_code']}] DB 写入失败: {e}")
                 db.rollback()
@@ -432,13 +500,19 @@ async def process_excel_streaming(
         db.commit()
         t_db = time.time() - t_db_start
 
-        logger.info(f"全部完成: LLM={completed}个 DB写入={db_success}个 总DB耗时={t_db:.1f}s")
+        total_skipped = dup_within_batch + db_duplicates
+        logger.info(
+            f"全部完成: LLM={completed}个 DB写入={db_success}个 "
+            f"跳过={total_skipped}个(批内重复{dup_within_batch}/DB已存在{db_duplicates}) "
+            f"DB耗时={t_db:.1f}s"
+        )
         yield {
             "event": "complete",
             "processed": db_success,
             "total": total,
             "llm_errors": errors,
-            "db_errors": (completed - errors) - db_success if (completed - errors) > db_success else 0,
+            "dup_within_batch": dup_within_batch,
+            "db_duplicates": db_duplicates,
             "db_time": round(t_db, 1),
         }
 
@@ -446,7 +520,6 @@ async def process_excel_streaming(
         logger.warning("ETL stream cancelled, cleaning up pending tasks")
         raise
     finally:
-        # 清理未完成的任务（客户端断开时）
         cancelled_count = 0
         for t in tasks:
             if not t.done():
@@ -470,6 +543,7 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
 
     blocks = scan_quotations(saved_path)
     processed_count = 0
+    seen_codes: set[str] = set()
 
     for block in blocks:
         try:
@@ -479,14 +553,23 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
             ))
             t_llm = time.time() - t0
 
+            # 批次内去重
+            code = data.get("quotation_no") or f"AUTO-{uuid.uuid4().hex[:6]}"
+            if code in seen_codes:
+                logger.warning(f"[{code}] 批次内重复，跳过")
+                continue
+            seen_codes.add(code)
+
             t1 = time.time()
             quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path)
             t_db = time.time() - t1
 
-            logger.info(f"[{quotation_code}] 耗时: LLM={t_llm:.1f}s  DB={t_db:.1f}s")
-
-            db.commit()
-            processed_count += 1
+            if quotation_code:
+                logger.info(f"[{quotation_code}] 耗时: LLM={t_llm:.1f}s  DB={t_db:.1f}s")
+                db.commit()
+                processed_count += 1
+            else:
+                logger.info(f"[{code}] 已存在，跳过")
 
         except Exception as e:
             db.rollback()
