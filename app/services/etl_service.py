@@ -243,9 +243,11 @@ async def _extract_one_async(block: QuotationBlock, semaphore: asyncio.Semaphore
                 model=settings.DEEPSEEK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=4096,
             )
             result_str = response.choices[0].message.content
+            if not result_str:
+                logger.error(f"LLM returned empty content, finish_reason={response.choices[0].finish_reason}")
             return json.loads(result_str)
         except Exception as e:
             logger.error(f"LLM extraction failed for block at row {block.row_idx}: {e}")
