@@ -101,7 +101,6 @@ class QuotationProcessFee(Base):
     tenant_id = Column(String(50), index=True, comment="租户ID")
     quotation_main_id = Column(Integer, ForeignKey("quotation_main.id"), index=True, comment="关联报价单主表ID")
 
-    seq_no = Column(Integer, comment="序号")
     process_name = Column(String(100), comment="制程名称 (如: 导体绞合)")
     std_hours = Column(Numeric(18, 4), comment="标准工时 (一台机1KM开机时间)")
     loss_hours = Column(Numeric(18, 4), comment="损耗时间 (1KM)")

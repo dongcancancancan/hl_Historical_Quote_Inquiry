@@ -381,11 +381,10 @@ def _write_one_quotation(
             deleted=False,
         ))
 
-    for idx, proc in enumerate(data.get("processes", [])):
+    for proc in data.get("processes", []):
         db.add(QuotationProcessFee(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
-            seq_no=idx + 1,
             process_name=proc.get("process_name") or "",
             std_hours=_safe_numeric(proc.get("std_hours")),
             loss_hours=_safe_numeric(proc.get("loss_hours")),
