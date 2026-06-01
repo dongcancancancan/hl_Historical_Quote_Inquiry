@@ -242,7 +242,8 @@ async def _extract_one_async(block: QuotationBlock, semaphore: asyncio.Semaphore
             response = await async_client.chat.completions.create(
                 model=settings.DEEPSEEK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                temperature=0.0,
+                extra_body={"thinking": {"type": "disabled"}},
             )
             result_str = response.choices[0].message.content
             return json.loads(result_str)
