@@ -364,12 +364,13 @@ def _write_one_quotation(
     db.add(new_main)
     db.flush()
 
-    for mat in data.get("materials", []):
+    for idx, mat in enumerate(data.get("materials", [])):
         raw_code = mat.get("material_code")
         material_code = str(raw_code).strip() if raw_code and str(raw_code).strip().lower() != "null" else ""
         db.add(QuotationMaterial(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
+            seq_no=idx + 1,
             process_name=mat.get("process_name") or "",
             spec_detail=mat.get("spec_detail") or "",
             unit_usage=_safe_numeric(mat.get("unit_usage")),
@@ -380,10 +381,11 @@ def _write_one_quotation(
             deleted=False,
         ))
 
-    for proc in data.get("processes", []):
+    for idx, proc in enumerate(data.get("processes", [])):
         db.add(QuotationProcessFee(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
+            seq_no=idx + 1,
             process_name=proc.get("process_name") or "",
             std_hours=_safe_numeric(proc.get("std_hours")),
             loss_hours=_safe_numeric(proc.get("loss_hours")),
