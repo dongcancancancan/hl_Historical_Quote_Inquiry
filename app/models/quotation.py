@@ -37,6 +37,7 @@ class QuotationMain(Base):
     other_fee = Column(Numeric(18, 4), comment="其他费用")
     delivery_fee = Column(Numeric(18, 4), comment="送货费")
     irradiation_core_count = Column(Numeric(10, 4), comment="辐照芯数")
+    irradiation_core_fee = Column(Numeric(10, 4), comment="照射费用")
     braiding_rate = Column(Numeric(18, 4), comment="编织率")
 
     # 利润与税率
