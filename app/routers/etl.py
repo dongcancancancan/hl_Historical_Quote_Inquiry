@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.auth import UserContext, get_current_user
-from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history
+from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,6 +73,7 @@ async def upload_and_process_excel(
             db=db,
             tenant_id=user.tenant_id,
             username=user.username,
+            display_name=user.display_name,
         )
         try:
             async for event in gen:
@@ -99,6 +100,19 @@ def upload_history(
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    """返回当前租户最近的上传历史"""
-    history = get_upload_history(db, user.tenant_id, limit=20)
+    """返回当前用户的报价单明细（按日期分组）"""
+    history = get_upload_history(db, user.tenant_id, user.display_name)
     return {"history": history}
+
+
+@router.delete("/quotation")
+def remove_quotation(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """删除指定成本分析号（仅创建者本人）"""
+    ok = delete_quotation(db, code, user.tenant_id, user.display_name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限删除")
+    return {"ok": True}

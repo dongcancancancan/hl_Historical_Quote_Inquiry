@@ -33,14 +33,12 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 
 注意规则：
 1. 绝对不能修改任何数值，保持原始浮点数精度！如果某个数值为空或解析不到，请使用 0.0 或 null。
-2. "process_name" (制程) 请尽量归一化，例如"铜绞"、"绞线"统一为"导体绞合"。
-3. 从详细规格中提取出所有胶料料号（常见前缀: EX, EE, D, V, C, PA），存入 material_codes 数组。
-4. 从品名规格中提取出线径或截面积数值（如 50mm2, 2.5mm），存入 cross_section，只保留数字和单位。
-5. 将百分比转换为小数（如 2% 转换为 0.02）。如果本身是小数则保持不变。
-6. 从表头区的"编织率(%)"列提取编织率百分比值，转换为小数（如 95 → 0.95、85% → 0.85），存入 braiding_rate。如果该列为空，再尝试从品名规格中提取（如 "95%编织"）。
-7. 从表头区提取"地址"字段（通常为"xx市"），存入 address。
-8. 核心表格中"物料编码"列的值提取到每个 material 的 material_code 字段，有的填、没有的用 null。
-9. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
+2. 从详细规格中提取出所有胶料料号（常见前缀: EX, EE, D, V, C, PA），存入 material_codes 数组。
+3. 将百分比转换为小数（如 2% 转换为 0.02）。如果本身是小数则保持不变。
+4. 表头区"结构"列的右侧紧跟"编织率(%)"列，提取编织率百分比值，转换为小数（如 95 → 0.95、85% → 0.85），存入 braiding_rate。如果该列为空，再尝试从品名规格中提取（如 "95%编织"）。
+5. 表头区"客户"列的右侧紧跟"地址"列（通常为"xx市"），存入 address。
+6. 核心表格中每一行制程的规格列之后紧跟"物料编码"列，将物料编码提取到该行 material 的 material_code 字段。物料编码可能是空值或"新开发"字样，均如实提取。
+7. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
 
 【表头区数据】
 {header_text}
@@ -56,14 +54,13 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
     "date_val": "分析日期 (YYYY-MM-DD)",
     "structure": "结构",
     "product_spec": "品名规格",
-    "cross_section": "线径/截面积",
     "braiding_rate": 浮点数 (编织率，小数形式，如 0.95),
     "material_codes": ["料号1", "料号2"],
     "materials": [
         {{
             "process_name": "制程名称",
             "spec_detail": "详细规格",
-            "material_code": "物料编码或null",
+            "material_code": "物料编码（可能为空或"新开发"）",
             "unit_usage": 浮点数 (单位用量),
             "unit_price": 浮点数 (单价),
             "material_amount": 浮点数 (材料金额)
@@ -146,35 +143,58 @@ def _safe_numeric(val, scale: int = 4) -> float:
         return 0.0
 
 
+def _row_values_xlsx(ws, row_idx: int) -> list[str]:
+    """openpyxl: 取一行所有单元格的字符串值（1-indexed）"""
+    return [str(c.value).strip() if c.value is not None else "" for c in ws[row_idx]]
+
+
+def _row_values_xls(ws, row_idx: int) -> list[str]:
+    """xlrd: 取一行所有单元格的字符串值（0-indexed）"""
+    return [str(v).strip() for v in ws.row_values(row_idx)]
+
+
 def scan_quotations(file_path: str) -> list[QuotationBlock]:
-    """阶段1：扫描 Excel，定位所有 成本分析表 锚点并提取文本块（毫秒级完成）"""
-    wb = load_workbook(file_path, data_only=True)
+    """阶段1：扫描 Excel(.xlsx/.xls)，定位所有 成本分析表 锚点并提取文本块"""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".xls":
+        import xlrd
+        wb = xlrd.open_workbook(file_path)
+        sheet_names = wb.sheet_names()
+        row_values = lambda ws, r: _row_values_xls(ws, r - 1)  # xlrd 0-indexed
+        max_row = lambda ws: ws.nrows
+        is_xls = True
+    else:
+        wb = load_workbook(file_path, data_only=True)
+        sheet_names = wb.sheetnames
+        row_values = _row_values_xlsx
+        max_row = lambda ws: ws.max_row
+        is_xls = False
+
     blocks = []
 
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+    for sheet_name in sheet_names:
+        ws = wb.sheet_by_name(sheet_name) if is_xls else wb[sheet_name]
 
-        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            first_cell = str(row[0]).strip() if row[0] else ""
+        for row_idx in range(1, max_row(ws) + 1):
+            vals = row_values(ws, row_idx)
+            first_cell = vals[0] if vals else ""
             clean_first = first_cell.replace(" ", "")
 
             if "成本分析表" in clean_first:
                 # 提取表头区（下 4 行）
                 header_rows = []
                 for i in range(1, 5):
-                    row_vals = [str(c.value).strip() if c.value is not None else ""
-                                for c in ws[row_idx + i]]
-                    header_rows.append(" | ".join(row_vals))
+                    header_rows.append(" | ".join(row_values(ws, row_idx + i)))
                 header_text = "\n".join(header_rows)
 
                 # 提取核心表格数据区
                 table_rows = []
                 mat_row = row_idx + 6
                 empty_count = 0
-                while mat_row <= ws.max_row:
-                    row_vals = [str(c.value).strip() if c.value is not None else ""
-                                for c in ws[mat_row]]
-                    cell_a = row_vals[0].replace(" ", "")
+                while mat_row <= max_row(ws):
+                    row_vals = row_values(ws, mat_row)
+                    cell_a = row_vals[0].replace(" ", "") if row_vals else ""
 
                     if "成本分析表" in cell_a:
                         break
@@ -192,7 +212,6 @@ def scan_quotations(file_path: str) -> list[QuotationBlock]:
                         break
                 table_text = "\n".join(table_rows)
 
-                # 编号预览：从表头第一行截取
                 preview = header_rows[0][:60] if header_rows else f"Row {row_idx}"
 
                 blocks.append(QuotationBlock(
@@ -203,7 +222,8 @@ def scan_quotations(file_path: str) -> list[QuotationBlock]:
                     preview=preview,
                 ))
 
-    wb.close()
+    if not is_xls:
+        wb.close()
     return blocks
 
 
@@ -265,9 +285,11 @@ def _write_one_quotation(
     tenant_id: str,
     username: str,
     saved_path: str,
+    display_name: str = "",
 ) -> str:
     """将单条 LLM 提取结果写入数据库，返回 quotation_code。
     如果成本分析号已存在则跳过，返回空字符串。"""
+    creator_name = display_name or username
     quotation_code = data.get("quotation_no") or f"AUTO-{uuid.uuid4().hex[:6]}"
     product_spec = data.get("product_spec") or ""
 
@@ -289,10 +311,8 @@ def _write_one_quotation(
         parsed_date = datetime.now().date()
 
     # extracted_tags
-    cross_section = data.get("cross_section")
     material_codes = list(data.get("material_codes", []))
     extracted_tags = json.dumps({
-        "cross_section": cross_section,
         "material_codes": material_codes,
         "customer_keyword": (data.get("customer") or "").split()[0] if data.get("customer") else None,
     }, ensure_ascii=False)
@@ -307,7 +327,6 @@ def _write_one_quotation(
         product_spec=product_spec,
         original_file_path=saved_path,
         extracted_tags=extracted_tags,
-        copper_price=_safe_numeric(cost_data.get("total_material_cost_kg")),
         unit_usage_sum=None,
         material_amount_sum=_safe_numeric(cost_data.get("total_material_amount")),
         material_cost=_safe_numeric(cost_data.get("total_material_cost_rmb_m")),
@@ -330,7 +349,7 @@ def _write_one_quotation(
         non_profit_price=_safe_numeric(cost_data.get("price_without_profit")),
         final_selling_price=_safe_numeric(cost_data.get("final_price")),
         braiding_rate=braiding_rate,
-        creator=username,
+        creator=creator_name,
         deleted=False,
     )
     db.add(new_main)
@@ -348,7 +367,7 @@ def _write_one_quotation(
             unit_price=_safe_numeric(mat.get("unit_price")),
             material_amount=_safe_numeric(mat.get("material_amount")),
             process_code=material_code,
-            creator=username,
+            creator=creator_name,
             deleted=False,
         ))
 
@@ -365,7 +384,7 @@ def _write_one_quotation(
             total_waste_glue=_safe_numeric(proc.get("total_waste_glue")),
             amount=_safe_numeric(proc.get("amount")),
             subtotal_fee=_safe_numeric(proc.get("subtotal_cost")),
-            creator=username,
+            creator=creator_name,
             deleted=False,
         ))
 
@@ -378,6 +397,7 @@ async def process_excel_streaming(
     db: Session,
     tenant_id: str,
     username: str,
+    display_name: str = "",
 ):
     """阶段2+3：并行调用 LLM 提取，实时产出 SSE 进度事件，最后写库（含去重）"""
     total = len(blocks)
@@ -480,7 +500,7 @@ async def process_excel_streaming(
             if r["data"] is None or r.get("dup_skipped"):
                 continue
             try:
-                code = _write_one_quotation(db, r["data"], tenant_id, username, saved_path)
+                code = _write_one_quotation(db, r["data"], tenant_id, username, saved_path, display_name)
                 if code:
                     db_success += 1
                     logger.info(f"[{code}] DB 写入完成")
@@ -529,49 +549,68 @@ async def process_excel_streaming(
             logger.warning(f"Cancelled {cancelled_count} pending LLM tasks due to disconnect")
 
 
-def get_upload_history(db: Session, tenant_id: str, limit: int = 20):
-    """查询当前租户的上传历史（按文件分组）"""
-    from sqlalchemy import func
+def get_upload_history(db: Session, tenant_id: str, creator_name: str, limit: int = 200):
+    """查询当前用户的报价单明细（按日期分组，每个报价单一行）"""
+    from sqlalchemy import func, Date
 
-    groups = (
+    rows = (
         db.query(
+            QuotationMain.quotation_code,
+            QuotationMain.customer_name,
+            QuotationMain.product_spec,
+            func.cast(QuotationMain.create_time, Date).label("create_date"),
+            QuotationMain.create_time,
             QuotationMain.original_file_path,
-            QuotationMain.creator,
-            func.min(QuotationMain.create_time).label("upload_time"),
-            func.count(QuotationMain.id).label("quotation_count"),
         )
         .filter(
             QuotationMain.tenant_id == tenant_id,
-            QuotationMain.original_file_path.isnot(None),
+            QuotationMain.creator == creator_name,
+            QuotationMain.deleted == False,
         )
-        .group_by(QuotationMain.original_file_path, QuotationMain.creator)
-        .order_by(func.min(QuotationMain.create_time).desc())
+        .order_by(QuotationMain.create_time.desc())
         .limit(limit)
         .all()
     )
 
-    result = []
-    for path, creator, upload_time, count in groups:
-        codes = [
-            r[0]
-            for r in db.query(QuotationMain.quotation_code)
-            .filter(
-                QuotationMain.original_file_path == path,
-                QuotationMain.tenant_id == tenant_id,
-            )
-            .order_by(QuotationMain.create_time)
-            .all()
-        ]
-        filename = os.path.basename(path) if path else "未知文件"
-        result.append({
-            "filename": filename,
-            "upload_time": upload_time.isoformat() if upload_time else None,
-            "upload_user": creator,
-            "quotation_count": count,
-            "quotations": codes,
+    # 按日期分组
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for code, customer, spec, create_date, create_time, path in rows:
+        date_key = str(create_date) if create_date else "未知日期"
+        if date_key not in groups:
+            groups[date_key] = []
+        groups[date_key].append({
+            "quotation_code": code,
+            "customer_name": customer or "",
+            "product_spec": spec or "",
+            "create_time": create_time.isoformat() if create_time else None,
+            "filename": os.path.basename(path) if path else "",
         })
 
-    return result
+    return [
+        {"date": date, "items": items}
+        for date, items in groups.items()
+    ]
+
+
+def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_name: str) -> bool:
+    """删除指定成本分析号（仅允许创建者本人删除），返回是否成功"""
+    q = (
+        db.query(QuotationMain)
+        .filter(
+            QuotationMain.quotation_code == quotation_code,
+            QuotationMain.tenant_id == tenant_id,
+            QuotationMain.creator == creator_name,
+            QuotationMain.deleted == False,
+        )
+        .first()
+    )
+    if not q:
+        return False
+    db.delete(q)  # cascade 会自动删 materials 和 processes
+    db.commit()
+    logger.info(f"[{quotation_code}] 已由 {creator_name} 删除")
+    return True
 
 
 # 保留同步版本，兼容旧的调用方式

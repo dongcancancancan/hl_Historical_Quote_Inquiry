@@ -23,7 +23,6 @@ class QuotationMain(Base):
     remark = Column(String(500), comment="备注")
 
     # 材料成本汇总
-    copper_price = Column(Numeric(18, 4), comment="铜价")
     unit_usage_sum = Column(Numeric(18, 4), comment="单位用量合计")
     material_amount_sum = Column(Numeric(18, 4), comment="材料金额合计")
     material_cost = Column(Numeric(18, 4), comment="材料成本")

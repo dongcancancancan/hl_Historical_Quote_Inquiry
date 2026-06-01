@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
     <title>成本分析表 ETL 入库系统</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
@@ -12,10 +13,9 @@
     <header class="bg-white shadow-sm border-b sticky top-0 z-10">
         <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
             <h1 class="text-xl font-bold text-gray-800">成本分析表 ETL 入库</h1>
-            <div class="flex items-center gap-3 text-sm text-gray-600">
-                <span id="currentTenant" class="bg-blue-50 text-blue-700 px-3 py-1 rounded"></span>
-                <span id="currentUser" class="bg-green-50 text-green-700 px-3 py-1 rounded"></span>
-                <button onclick="logout()" class="text-red-500 hover:text-red-700 underline">退出</button>
+            <div class="flex items-center gap-3">
+                <div id="greetingBox" class="flex items-center gap-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 px-3 py-1.5 rounded-full border border-blue-100"></div>
+                <button onclick="logout()" class="text-xs text-gray-400 hover:text-red-500 transition">退出</button>
             </div>
         </div>
     </header>
@@ -23,13 +23,16 @@
     <!-- 主体：左侧历史 + 右侧操作区 -->
     <div class="max-w-7xl mx-auto px-4 py-6 flex gap-6">
         <!-- 左侧：上传历史 -->
-        <aside class="w-72 shrink-0">
+        <aside class="w-80 shrink-0">
             <div class="bg-white rounded-lg shadow-md p-4 sticky top-16">
                 <div class="flex items-center justify-between mb-3">
                     <h2 class="text-sm font-semibold text-gray-700">上传历史</h2>
-                    <button id="refreshHistoryBtn" class="text-xs text-blue-600 hover:underline" onclick="loadHistory()">刷新</button>
+                    <button class="text-xs text-blue-600 hover:underline" onclick="loadHistory()">刷新</button>
                 </div>
-                <div id="historyList" class="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto">
+                <input type="text" id="historySearch" placeholder="搜索成本分析号..."
+                    class="w-full text-xs px-3 py-1.5 border rounded mb-3 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    oninput="filterHistory()">
+                <div id="historyList" class="space-y-2 max-h-[calc(100vh-220px)] overflow-y-auto">
                     <div class="text-sm text-gray-400 text-center py-4">加载中...</div>
                 </div>
             </div>
@@ -42,7 +45,7 @@
                 <h2 class="text-lg font-semibold mb-4 text-blue-600">上传成本分析表</h2>
                 <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分 Sheet 并入库。</p>
                 <form id="uploadForm" class="space-y-4">
-                    <input type="file" id="excelFile" accept=".xlsx, .xls" class="block w-full text-sm text-gray-500
+                    <input type="file" id="excelFile" accept=".xls,.xlsx" class="block w-full text-sm text-gray-500
                         file:mr-4 file:py-2 file:px-4
                         file:rounded-full file:border-0
                         file:text-sm file:font-semibold
@@ -65,12 +68,31 @@
 
     <script>
         const token = sessionStorage.getItem('token');
-        const tenantName = sessionStorage.getItem('tenantName');
-        const userName = sessionStorage.getItem('userName');
+        const displayName = sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '';
         if (!token) { window.location.href = '/static/login.html'; }
 
-        document.getElementById('currentTenant').textContent = '部门: ' + tenantName;
-        document.getElementById('currentUser').textContent = '用户: ' + userName;
+        // 时间问候语 + 头像
+        (function renderGreeting() {
+            const h = new Date().getHours();
+            let emoji, greeting;
+            if (h >= 6 && h < 9)   { emoji = '🌅'; greeting = '早上好'; }
+            else if (h >= 9 && h < 12) { emoji = '☀️'; greeting = '上午好'; }
+            else if (h >= 12 && h < 14) { emoji = '🌞'; greeting = '中午好'; }
+            else if (h >= 14 && h < 18) { emoji = '🌤️'; greeting = '下午好'; }
+            else                   { emoji = '🌙'; greeting = '晚上好'; }
+
+            const initial = displayName.charAt(0);
+            document.getElementById('greetingBox').innerHTML =
+                '<div class=\"w-7 h-7 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold shrink-0\">' +
+                    initial +
+                '</div>' +
+                '<span class=\"text-sm text-gray-700\">' +
+                    '<span class=\"text-gray-400\">' + emoji + '</span> ' +
+                    '<span class=\"font-medium\">' + greeting + '</span>' +
+                    '<span class=\"text-gray-400\">，</span>' +
+                    '<span class=\"font-semibold text-blue-700\">' + displayName + '</span>' +
+                '</span>';
+        })();
 
         function logout() { sessionStorage.clear(); window.location.href = '/static/login.html'; }
         function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
@@ -95,6 +117,8 @@
         }
 
         // ============ 上传历史 ============
+        let historyData = [];  // 缓存原始数据用于搜索过滤
+
         async function loadHistory() {
             const list = document.getElementById('historyList');
             try {
@@ -103,29 +127,75 @@
                 });
                 const data = await res.json();
                 if (!data.history || data.history.length === 0) {
+                    historyData = [];
                     list.innerHTML = '<div class="text-sm text-gray-400 text-center py-4">暂无上传记录</div>';
                     return;
                 }
-                list.innerHTML = data.history.map((item, i) => {
-                    const time = item.upload_time ? item.upload_time.replace('T', ' ').substring(0, 16) : '';
-                    const codesHtml = item.quotations.map(c => '<span class="inline-block bg-gray-100 rounded px-1.5 py-0.5 text-xs mr-1 mb-1 font-mono">' + escapeHtml(c) + '</span>').join('');
-                    return '<div class="border rounded-lg p-3 cursor-pointer hover:bg-gray-50 transition" onclick="toggleHistory(this)">' +
-                        '<div class="flex items-center justify-between">' +
-                            '<span class="text-xs font-mono text-gray-600 truncate max-w-[160px]" title="' + escapeHtml(item.filename) + '">' + escapeHtml(item.filename) + '</span>' +
-                            '<span class="text-xs text-blue-600 font-semibold whitespace-nowrap">' + item.quotation_count + ' 个</span>' +
-                        '</div>' +
-                        '<div class="text-xs text-gray-400 mt-1">' + time + ' · ' + escapeHtml(item.upload_user || '') + '</div>' +
-                        '<div class="hidden history-detail mt-2 pt-2 border-t">' + codesHtml + '</div>' +
-                    '</div>';
-                }).join('');
+                historyData = data.history;
+                renderHistory(historyData);
             } catch (err) {
                 list.innerHTML = '<div class="text-sm text-red-400 text-center py-4">加载失败</div>';
             }
         }
 
-        function toggleHistory(el) {
-            const detail = el.querySelector('.history-detail');
-            if (detail) detail.classList.toggle('hidden');
+        function filterHistory() {
+            const keyword = (document.getElementById('historySearch').value || '').trim().toUpperCase();
+            if (!keyword) { renderHistory(historyData); return; }
+            const filtered = [];
+            for (const group of historyData) {
+                const items = group.items.filter(it => it.quotation_code.toUpperCase().includes(keyword));
+                if (items.length > 0) filtered.push({ date: group.date, items: items });
+            }
+            renderHistory(filtered);
+        }
+
+        function renderHistory(groups) {
+            const list = document.getElementById('historyList');
+            if (!groups || groups.length === 0) {
+                list.innerHTML = '<div class="text-sm text-gray-400 text-center py-4">无匹配记录</div>';
+                return;
+            }
+            list.innerHTML = groups.map(group => {
+                const rows = group.items.map(it => {
+                    const time = it.create_time ? it.create_time.replace('T', ' ').substring(11, 16) : '';
+                    const tooltip = [it.customer_name, it.product_spec, it.filename].filter(Boolean).join(' | ');
+                    return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
+                        '<div class="flex-1 min-w-0" title="' + escapeHtml(tooltip) + '">' +
+                            '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
+                            '<span class="text-xs text-gray-400 truncate block">' + escapeHtml(it.customer_name + ' ' + it.product_spec).substring(0, 24) + '</span>' +
+                        '</div>' +
+                        '<div class="flex items-center gap-2 shrink-0">' +
+                            '<span class="text-xs text-gray-400">' + time + '</span>' +
+                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(\'' + escapeHtml(it.quotation_code) + '\', this)" title="删除">✕</button>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+                return '<div class="mb-3">' +
+                    '<div class="text-xs text-gray-500 font-medium mb-1 pl-2">' + group.date + '</div>' +
+                    '<div class="border rounded-lg divide-y">' + rows + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        async function deleteQuotation(code, btnEl) {
+            if (!confirm('确认删除成本分析号 ' + code + ' 吗？此操作不可撤销。')) return;
+            btnEl.disabled = true;
+            try {
+                const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(code), {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '删除失败'); }
+                // 从缓存中移除
+                for (const group of historyData) {
+                    group.items = group.items.filter(it => it.quotation_code !== code);
+                }
+                historyData = historyData.filter(g => g.items.length > 0);
+                filterHistory(); // 重新渲染（保留搜索关键词）
+            } catch (err) {
+                alert('删除失败: ' + err.message);
+                btnEl.disabled = false;
+            }
         }
 
         loadHistory();

@@ -17,6 +17,7 @@ class UserContext:
     username: str
     tenant_id: str
     tenant_name: str
+    display_name: str
 
 
 def hash_password(password: str) -> str:
@@ -25,17 +26,26 @@ def hash_password(password: str) -> str:
     return f"{salt}${h}"
 
 
+def hash_password_md5(password: str) -> str:
+    """兼容 BPM 系统的 MD5 密码格式，存储时加 md5: 前缀以区分"""
+    return f"md5:{hashlib.md5(password.encode()).hexdigest()}"
+
+
 def verify_password(password: str, stored: str) -> bool:
+    # 兼容 BPM 的 MD5 格式
+    if stored.startswith("md5:"):
+        return hashlib.md5(password.encode()).hexdigest() == stored[4:]
     salt, h = stored.split("$", 1)
     return hashlib.sha256((salt + password).encode()).hexdigest() == h
 
 
-def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str) -> str:
+def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str, display_name: str = "") -> str:
     payload = {
         "user_id": user_id,
         "username": username,
         "tenant_id": tenant_code,
         "tenant_name": tenant_name,
+        "display_name": display_name or username,
         "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS),
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
@@ -49,6 +59,7 @@ def decode_token(token: str) -> UserContext:
             username=payload["username"],
             tenant_id=payload["tenant_id"],
             tenant_name=payload["tenant_name"],
+            display_name=payload.get("display_name", payload["username"]),
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")

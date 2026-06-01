@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
     <title>登录 - 成本分析表 ETL 入库系统</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
@@ -24,9 +25,6 @@
                 登录
             </button>
         </form>
-        <p class="text-sm text-gray-500 text-center mt-4">
-            还没有账号？<a href="/static/register.html" class="text-blue-600 hover:underline">注册</a>
-        </p>
     </div>
 
     <script>
@@ -52,6 +50,7 @@
                 sessionStorage.setItem('tenantId', data.tenant_id);
                 sessionStorage.setItem('tenantName', data.tenant_name);
                 sessionStorage.setItem('userName', data.username);
+                sessionStorage.setItem('displayName', data.display_name || data.username);
                 window.location.href = '/static/index.html';
             } catch (err) {
                 errorDiv.textContent = err.message;
