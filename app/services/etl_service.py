@@ -555,24 +555,28 @@ async def process_excel_streaming(
             logger.warning(f"Cancelled {cancelled_count} pending LLM tasks due to disconnect")
 
 
-def get_upload_history(db: Session, tenant_id: str, creator_name: str, limit: int = 200):
-    """查询当前用户的报价单明细（按日期分组，每个报价单一行）"""
+def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin: bool = False, limit: int = 500):
+    """查询报价单明细（按日期分组），管理员可查看所有"""
     from sqlalchemy import func, Date
+
+    filters = [
+        QuotationMain.tenant_id == tenant_id,
+        QuotationMain.deleted == False,
+    ]
+    if not is_admin:
+        filters.append(QuotationMain.creator == creator_name)
 
     rows = (
         db.query(
             QuotationMain.quotation_code,
             QuotationMain.customer_name,
             QuotationMain.product_spec,
+            QuotationMain.creator,
             func.cast(QuotationMain.create_time, Date).label("create_date"),
             QuotationMain.create_time,
             QuotationMain.original_file_path,
         )
-        .filter(
-            QuotationMain.tenant_id == tenant_id,
-            QuotationMain.creator == creator_name,
-            QuotationMain.deleted == False,
-        )
+        .filter(*filters)
         .order_by(QuotationMain.create_time.desc())
         .limit(limit)
         .all()
@@ -581,7 +585,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, limit: in
     # 按日期分组
     from collections import OrderedDict
     groups = OrderedDict()
-    for code, customer, spec, create_date, create_time, path in rows:
+    for code, customer, spec, creator, create_date, create_time, path in rows:
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
@@ -589,6 +593,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, limit: in
             "quotation_code": code,
             "customer_name": customer or "",
             "product_spec": spec or "",
+            "upload_user": creator or "",
             "create_time": create_time.isoformat() if create_time else None,
             "filename": os.path.basename(path) if path else "",
         })
@@ -599,23 +604,22 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, limit: in
     ]
 
 
-def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_name: str) -> bool:
-    """删除指定成本分析号（仅允许创建者本人删除），返回是否成功"""
-    q = (
-        db.query(QuotationMain)
-        .filter(
-            QuotationMain.quotation_code == quotation_code,
-            QuotationMain.tenant_id == tenant_id,
-            QuotationMain.creator == creator_name,
-            QuotationMain.deleted == False,
-        )
-        .first()
-    )
+def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_name: str, is_admin: bool = False) -> bool:
+    """删除指定成本分析号（管理员可删任意，普通用户仅可删自己），返回是否成功"""
+    filters = [
+        QuotationMain.quotation_code == quotation_code,
+        QuotationMain.tenant_id == tenant_id,
+        QuotationMain.deleted == False,
+    ]
+    if not is_admin:
+        filters.append(QuotationMain.creator == creator_name)
+
+    q = db.query(QuotationMain).filter(*filters).first()
     if not q:
         return False
-    db.delete(q)  # cascade 会自动删 materials 和 processes
+    db.delete(q)
     db.commit()
-    logger.info(f"[{quotation_code}] 已由 {creator_name} 删除")
+    logger.info(f"[{quotation_code}] 已由 {creator_name} 删除 (admin={is_admin})")
     return True
 
 

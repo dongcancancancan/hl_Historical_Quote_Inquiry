@@ -54,13 +54,14 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
 
     display_name = user.display_name or user.username
-    token = create_token(user.id, user.username, tenant.code, tenant.display_name, display_name)
+    token = create_token(user.id, user.username, tenant.code, tenant.display_name, display_name, bool(user.is_admin))
     return {
         "token": token,
         "tenant_id": tenant.code,
         "tenant_name": tenant.display_name,
         "username": user.username,
         "display_name": display_name,
+        "is_admin": bool(user.is_admin),
     }
 
 
@@ -71,13 +72,14 @@ def _authenticate_local(db: Session, username: str, password: str):
         if verify_password(password, user.password_hash):
             tenant = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
             display_name = user.display_name or user.username
-            token = create_token(user.id, user.username, tenant.code, tenant.display_name, display_name)
+            token = create_token(user.id, user.username, tenant.code, tenant.display_name, display_name, bool(user.is_admin))
             return {
                 "token": token,
                 "tenant_id": tenant.code,
                 "tenant_name": tenant.display_name,
                 "username": user.username,
                 "display_name": display_name,
+                "is_admin": bool(user.is_admin),
             }
     return None
 
@@ -124,7 +126,7 @@ def _authenticate_bpm(db: Session, username: str, password: str):
         db.add(local_user)
         db.commit()
 
-    token = create_token(local_user.id, username, tenant.code, tenant.display_name, display_name)
+    token = create_token(local_user.id, username, tenant.code, tenant.display_name, display_name, bool(local_user.is_admin))
     logger.info(f"BPM user '{username}' authenticated and synced to local users")
     return {
         "token": token,
@@ -132,6 +134,7 @@ def _authenticate_bpm(db: Session, username: str, password: str):
         "tenant_name": tenant.display_name,
         "username": username,
         "display_name": display_name,
+        "is_admin": bool(local_user.is_admin),
     }
 
 

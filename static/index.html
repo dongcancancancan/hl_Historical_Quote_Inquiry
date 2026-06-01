@@ -69,6 +69,7 @@
     <script>
         const token = sessionStorage.getItem('token');
         const displayName = sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '';
+        const isAdmin = sessionStorage.getItem('isAdmin') === '1';
         if (!token) { window.location.href = '/static/login.html'; }
 
         // 时间问候语 + 头像
@@ -82,6 +83,7 @@
             else                   { emoji = '🌙'; greeting = '晚上好'; }
 
             const initial = displayName.charAt(0);
+            const adminBadge = isAdmin ? '<span class=\"text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold ml-1\">管理员</span>' : '';
             document.getElementById('greetingBox').innerHTML =
                 '<div class=\"w-7 h-7 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold shrink-0\">' +
                     initial +
@@ -91,6 +93,7 @@
                     '<span class=\"font-medium\">' + greeting + '</span>' +
                     '<span class=\"text-gray-400\">，</span>' +
                     '<span class=\"font-semibold text-blue-700\">' + displayName + '</span>' +
+                    adminBadge +
                 '</span>';
         })();
 
@@ -158,13 +161,15 @@
             list.innerHTML = groups.map(group => {
                 const rows = group.items.map(it => {
                     const time = it.create_time ? it.create_time.replace('T', ' ').substring(11, 16) : '';
-                    const tooltip = [it.customer_name, it.product_spec, it.filename].filter(Boolean).join(' | ');
+                    const tooltip = [it.customer_name, it.product_spec, it.filename, it.upload_user].filter(Boolean).join(' | ');
+                    const uploader = isAdmin && it.upload_user ? '<span class=\"text-xs text-gray-400 mr-1\">' + escapeHtml(it.upload_user) + '</span>' : '';
                     return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
                         '<div class="flex-1 min-w-0" title="' + escapeHtml(tooltip) + '">' +
                             '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
                             '<span class="text-xs text-gray-400 truncate block">' + escapeHtml(it.customer_name + ' ' + it.product_spec).substring(0, 24) + '</span>' +
                         '</div>' +
                         '<div class="flex items-center gap-2 shrink-0">' +
+                            uploader +
                             '<span class="text-xs text-gray-400">' + time + '</span>' +
                             '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(\'' + escapeHtml(it.quotation_code) + '\', this)" title="删除">✕</button>' +
                         '</div>' +

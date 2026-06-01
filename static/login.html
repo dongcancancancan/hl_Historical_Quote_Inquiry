@@ -51,6 +51,7 @@
                 sessionStorage.setItem('tenantName', data.tenant_name);
                 sessionStorage.setItem('userName', data.username);
                 sessionStorage.setItem('displayName', data.display_name || data.username);
+                sessionStorage.setItem('isAdmin', data.is_admin ? '1' : '');
                 window.location.href = '/static/index.html';
             } catch (err) {
                 errorDiv.textContent = err.message;

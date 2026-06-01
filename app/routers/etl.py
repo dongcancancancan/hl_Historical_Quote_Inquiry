@@ -100,8 +100,8 @@ def upload_history(
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    """返回当前用户的报价单明细（按日期分组）"""
-    history = get_upload_history(db, user.tenant_id, user.display_name)
+    """返回报价单明细（按日期分组）。管理员可查看所有，普通用户仅看自己的。"""
+    history = get_upload_history(db, user.tenant_id, user.display_name, user.is_admin)
     return {"history": history}
 
 
@@ -111,8 +111,8 @@ def remove_quotation(
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
-    """删除指定成本分析号（仅创建者本人）"""
-    ok = delete_quotation(db, code, user.tenant_id, user.display_name)
+    """删除指定成本分析号（管理员可删任意，普通用户仅可删自己）"""
+    ok = delete_quotation(db, code, user.tenant_id, user.display_name, user.is_admin)
     if not ok:
         raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限删除")
     return {"ok": True}

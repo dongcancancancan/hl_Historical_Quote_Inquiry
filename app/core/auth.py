@@ -18,6 +18,7 @@ class UserContext:
     tenant_id: str
     tenant_name: str
     display_name: str
+    is_admin: bool = False
 
 
 def hash_password(password: str) -> str:
@@ -39,13 +40,14 @@ def verify_password(password: str, stored: str) -> bool:
     return hashlib.sha256((salt + password).encode()).hexdigest() == h
 
 
-def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str, display_name: str = "") -> str:
+def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str, display_name: str = "", is_admin: bool = False) -> str:
     payload = {
         "user_id": user_id,
         "username": username,
         "tenant_id": tenant_code,
         "tenant_name": tenant_name,
         "display_name": display_name or username,
+        "is_admin": is_admin,
         "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS),
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
@@ -60,6 +62,7 @@ def decode_token(token: str) -> UserContext:
             tenant_id=payload["tenant_id"],
             tenant_name=payload["tenant_name"],
             display_name=payload.get("display_name", payload["username"]),
+            is_admin=payload.get("is_admin", False),
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")

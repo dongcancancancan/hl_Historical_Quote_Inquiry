@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -20,6 +20,7 @@ class User(Base):
     username = Column(String(64), nullable=False, comment="用户名")
     password_hash = Column(String(256), nullable=False, comment="密码哈希")
     display_name = Column(String(100), comment="显示名称")
+    is_admin = Column(Boolean, nullable=False, default=False, comment="管理员标识")
     created_at = Column(DateTime, server_default=func.now())
 
 
