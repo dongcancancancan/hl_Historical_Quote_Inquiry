@@ -46,7 +46,7 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 【核心表格数据】
 {material_text}
 
-请严格输出如下 JSON 格式（不要输出 markdown 代码块标记，只输出合法 JSON 字符串）：
+请严格输出如下 JSON 格式（【重要】只输出纯 JSON，禁止用 ``` 包裹，禁止添加任何解释文字，响应第一个字符必须是 {{）：
 {{
     "quotation_no": "编号",
     "customer": "客户",
@@ -231,27 +231,84 @@ def scan_quotations(file_path: str) -> list[QuotationBlock]:
 
 
 async def _extract_one_async(block: QuotationBlock, semaphore: asyncio.Semaphore) -> dict:
-    """对单个报价单文本块调用 LLM 提取，受 semaphore 限制并发数"""
+    """对单个报价单文本块调用 LLM 提取，受 semaphore 限制并发数。空内容时自动重试一次。"""
+    import re as _re
     prompt = EXTRACTION_PROMPT.format(
         header_text=block.header_text,
         material_text=block.table_text,
     )
 
-    async with semaphore:
+    def _parse_json(raw: str) -> dict:
+        """尝试解析 LLM 返回内容为 JSON，支持去除 markdown 代码块包裹"""
+        if not raw or not raw.strip():
+            raise ValueError("Empty or whitespace-only response")
+        # 尝试直接解析
         try:
-            response = await async_client.chat.completions.create(
-                model=settings.DEEPSEEK_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=4096,
-            )
-            result_str = response.choices[0].message.content
-            if not result_str:
-                logger.error(f"LLM returned empty content, finish_reason={response.choices[0].finish_reason}")
-            return json.loads(result_str)
-        except Exception as e:
-            logger.error(f"LLM extraction failed for block at row {block.row_idx}: {e}")
-            raise
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        # 尝试提取 markdown 代码块中的 JSON
+        m = _re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw, _re.DOTALL)
+        if m:
+            return json.loads(m.group(1).strip())
+        # 尝试找第一个 { 到最后一个 }
+        start = raw.find('{')
+        end = raw.rfind('}')
+        if start != -1 and end > start:
+            return json.loads(raw[start:end + 1])
+        raise
+
+    async with semaphore:
+        last_error = None
+        for attempt in range(2):
+            try:
+                response = await async_client.chat.completions.create(
+                    model=settings.DEEPSEEK_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=4096,
+                )
+                choice = response.choices[0]
+                result_str = choice.message.content
+                if not result_str or not result_str.strip():
+                    detail = {
+                        "finish_reason": choice.finish_reason,
+                        "content": result_str,
+                        "refusal": getattr(choice.message, "refusal", None),
+                        "reasoning_content": getattr(choice.message, "reasoning_content", None),
+                        "usage": str(response.usage) if response.usage else None,
+                        "prompt_len": len(prompt),
+                        "attempt": attempt + 1,
+                    }
+                    logger.warning(
+                        f"LLM returned empty content (attempt {attempt + 1}/2)! "
+                        f"Detail: {json.dumps(detail, ensure_ascii=False)}"
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(2)
+                        continue
+                    raise ValueError(f"LLM returned empty content after 2 attempts")
+
+                return _parse_json(result_str)
+
+            except json.JSONDecodeError:
+                # 非空但格式不对：记录实际内容便于排查，不重试
+                logger.error(
+                    f"LLM returned non-JSON content (len={len(result_str)}): "
+                    f"{str(result_str)[:500]}"
+                )
+                raise
+            except ValueError:
+                raise  # 空内容异常直接抛出
+            except Exception as e:
+                last_error = e
+                logger.error(f"LLM call failed (attempt {attempt + 1}/2): {e}")
+                if attempt == 0:
+                    await asyncio.sleep(2)
+
+        if last_error:
+            raise last_error
+        raise ValueError(f"LLM returned empty content after 2 attempts, prompt_len={len(prompt)}")
 
 
 def _enrich_extracted(data: dict, product_spec: str) -> None:
