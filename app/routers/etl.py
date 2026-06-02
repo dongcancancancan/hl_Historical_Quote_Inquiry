@@ -5,11 +5,17 @@ import time
 import shutil
 import logging
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.auth import UserContext, get_current_user
 from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
+from app.services.excel_preview_service import (
+    get_accessible_quotation,
+    render_quotation_preview,
+    update_quotation_fields,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -17,6 +23,17 @@ router = APIRouter()
 UPLOAD_DIR = "data/original_excels"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+class QuotationFieldChange(BaseModel):
+    entity: str
+    id: int
+    field: str
+    value: str | None = None
+
+
+class QuotationUpdateRequest(BaseModel):
+    changes: list[QuotationFieldChange]
 
 
 @router.post("/upload_excel")
@@ -116,3 +133,48 @@ def remove_quotation(
     if not ok:
         raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限删除")
     return {"ok": True}
+
+
+@router.get("/quotation/preview", response_class=HTMLResponse)
+def preview_quotation(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """按成本分析号查询数据库并返回成本分析表网页预览。"""
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    try:
+        return HTMLResponse(render_quotation_preview(quotation))
+    except Exception as exc:
+        logger.exception("Excel preview failed for %s", code)
+        raise HTTPException(status_code=500, detail=f"Excel 预览生成失败: {exc}")
+
+
+@router.patch("/quotation")
+def update_quotation(
+    code: str,
+    req: QuotationUpdateRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """批量更新成本分析表字段，不重新调用 LLM。"""
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限修改")
+    try:
+        new_code = update_quotation_fields(
+            db,
+            quotation,
+            [change.model_dump() for change in req.changes],
+            user.display_name,
+        )
+        return {"ok": True, "quotation_code": new_code, "updated_fields": len(req.changes)}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        logger.exception("Quotation update failed for %s", code)
+        raise HTTPException(status_code=500, detail="成本分析表更新失败")

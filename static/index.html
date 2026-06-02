@@ -66,6 +66,28 @@
         </main>
     </div>
 
+    <!-- 数据库成本分析表预览 -->
+    <div id="previewModal" class="fixed inset-0 z-50 hidden bg-black/40 p-4 sm:p-8">
+        <div class="mx-auto flex h-full max-w-7xl flex-col overflow-hidden rounded-lg bg-white shadow-xl">
+            <div class="flex items-center justify-between border-b px-4 py-3">
+                <div>
+                    <h2 class="text-base font-semibold text-gray-800">成本分析表预览</h2>
+                    <p id="previewCode" class="text-xs font-mono text-gray-500"></p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs text-gray-400">数据库实时渲染</span>
+                    <span id="previewSaveStatus" class="text-xs text-gray-400"></span>
+                    <button id="previewEditBtn" class="text-sm text-blue-600 hover:text-blue-800" onclick="enablePreviewEditing()">编辑</button>
+                    <button id="previewSaveBtn" class="hidden text-sm text-green-600 hover:text-green-800" onclick="savePreviewChanges()">保存</button>
+                    <button id="previewCancelBtn" class="hidden text-sm text-gray-500 hover:text-gray-700" onclick="cancelPreviewEditing()">取消</button>
+                    <button class="text-2xl leading-none text-gray-400 hover:text-gray-700" onclick="closePreview()" title="关闭">×</button>
+                </div>
+            </div>
+            <div id="previewLoading" class="flex flex-1 items-center justify-center text-sm text-gray-500">正在加载数据库内容...</div>
+            <iframe id="previewFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="成本分析表预览"></iframe>
+        </div>
+    </div>
+
     <script>
         const token = sessionStorage.getItem('token');
         const displayName = sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '';
@@ -163,15 +185,16 @@
                     const time = it.create_time ? it.create_time.replace('T', ' ').substring(11, 16) : '';
                     const tooltip = [it.customer_name, it.product_spec, it.filename, it.upload_user].filter(Boolean).join(' | ');
                     const uploader = isAdmin && it.upload_user ? '<span class=\"text-xs text-gray-400 mr-1\">' + escapeHtml(it.upload_user) + '</span>' : '';
+                    const encodedCode = encodeURIComponent(it.quotation_code);
                     return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
-                        '<div class="flex-1 min-w-0" title="' + escapeHtml(tooltip) + '">' +
+                        '<button class="flex-1 min-w-0 text-left" title="' + escapeHtml(tooltip) + '" onclick="previewQuotation(decodeURIComponent(\'' + encodedCode + '\'))">' +
                             '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
                             '<span class="text-xs text-gray-400 truncate block">' + escapeHtml(it.customer_name + ' ' + it.product_spec).substring(0, 24) + '</span>' +
-                        '</div>' +
+                        '</button>' +
                         '<div class="flex items-center gap-2 shrink-0">' +
                             uploader +
                             '<span class="text-xs text-gray-400">' + time + '</span>' +
-                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(\'' + escapeHtml(it.quotation_code) + '\', this)" title="删除">✕</button>' +
+                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>' +
                         '</div>' +
                     '</div>';
                 }).join('');
@@ -200,6 +223,107 @@
             } catch (err) {
                 alert('删除失败: ' + err.message);
                 btnEl.disabled = false;
+            }
+        }
+
+        let previewQuotationCode = '';
+
+        async function previewQuotation(code) {
+            const modal = document.getElementById('previewModal');
+            const loading = document.getElementById('previewLoading');
+            const frame = document.getElementById('previewFrame');
+            previewQuotationCode = code;
+            document.getElementById('previewCode').textContent = code;
+            modal.classList.remove('hidden');
+            loading.classList.remove('hidden');
+            loading.textContent = '正在加载数据库内容...';
+            frame.classList.add('hidden');
+            frame.removeAttribute('srcdoc');
+            resetPreviewToolbar();
+
+            try {
+                const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(code), {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '预览加载失败'); }
+                frame.srcdoc = await res.text();
+                loading.classList.add('hidden');
+                frame.classList.remove('hidden');
+            } catch (err) {
+                loading.textContent = '加载失败：' + err.message;
+            }
+        }
+
+        function closePreview() {
+            document.getElementById('previewModal').classList.add('hidden');
+            document.getElementById('previewFrame').removeAttribute('srcdoc');
+            previewQuotationCode = '';
+            resetPreviewToolbar();
+        }
+
+        function resetPreviewToolbar() {
+            document.getElementById('previewEditBtn').classList.remove('hidden');
+            document.getElementById('previewSaveBtn').classList.add('hidden');
+            document.getElementById('previewCancelBtn').classList.add('hidden');
+            document.getElementById('previewSaveStatus').textContent = '';
+        }
+
+        function enablePreviewEditing() {
+            const frame = document.getElementById('previewFrame');
+            const inputs = frame.contentDocument.querySelectorAll('.sheet-input');
+            inputs.forEach(input => { input.disabled = false; });
+            document.getElementById('previewEditBtn').classList.add('hidden');
+            document.getElementById('previewSaveBtn').classList.remove('hidden');
+            document.getElementById('previewCancelBtn').classList.remove('hidden');
+            document.getElementById('previewSaveStatus').textContent = '编辑中';
+        }
+
+        function cancelPreviewEditing() {
+            if (previewQuotationCode) previewQuotation(previewQuotationCode);
+        }
+
+        async function savePreviewChanges() {
+            const frame = document.getElementById('previewFrame');
+            const saveBtn = document.getElementById('previewSaveBtn');
+            const status = document.getElementById('previewSaveStatus');
+            const inputs = frame.contentDocument.querySelectorAll('.sheet-input');
+            const changes = Array.from(inputs)
+                .filter(input => input.value !== input.defaultValue)
+                .map(input => ({
+                    entity: input.dataset.entity,
+                    id: Number(input.dataset.id),
+                    field: input.dataset.field,
+                    value: input.value,
+                }));
+
+            if (changes.length === 0) {
+                status.textContent = '没有修改';
+                return;
+            }
+
+            saveBtn.disabled = true;
+            status.textContent = '正在保存...';
+            try {
+                const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(previewQuotationCode), {
+                    method: 'PATCH',
+                    headers: {
+                        'Authorization': 'Bearer ' + token,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ changes }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '保存失败');
+                previewQuotationCode = data.quotation_code;
+                document.getElementById('previewCode').textContent = previewQuotationCode;
+                await loadHistory();
+                await previewQuotation(previewQuotationCode);
+                document.getElementById('previewSaveStatus').textContent = '已保存';
+            } catch (err) {
+                status.textContent = '保存失败';
+                alert('保存失败: ' + err.message);
+            } finally {
+                saveBtn.disabled = false;
             }
         }
 
