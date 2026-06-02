@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>审价科工作台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-screen overflow-hidden bg-gray-100 font-sans text-gray-800">
+    <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
+        <div>
+            <h1 class="text-base font-semibold">审价科工作台</h1>
+            <p class="text-xs text-gray-400">历史成本分析表审价</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="/static/copper-fees.html" class="text-sm text-blue-600 hover:text-blue-800">铜加工费</a>
+            <a href="/static/pvc-material-prices.html" class="text-sm text-blue-600 hover:text-blue-800">PVC 材料价格</a>
+            <span id="reviewerName" class="text-sm text-gray-600"></span>
+            <button class="text-xs text-gray-400 hover:text-red-500" onclick="logout()">退出</button>
+        </div>
+    </header>
+
+    <main class="grid h-[calc(100vh-56px)] grid-cols-[320px_minmax(0,1fr)_320px] gap-3 p-3">
+        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
+            <div class="border-b p-3">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-orange-700">待报价</h2>
+                    <span id="pendingCount" class="text-xs text-gray-400">0</span>
+                </div>
+                <input id="pendingSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-orange-400" placeholder="搜索成本分析号..." oninput="renderLists()">
+            </div>
+            <div id="pendingList" class="flex-1 overflow-y-auto p-2"></div>
+        </aside>
+
+        <section class="flex min-h-0 min-w-0 flex-col border bg-white shadow-sm">
+            <div class="flex h-14 items-center justify-between border-b px-4">
+                <div>
+                    <h2 id="sheetTitle" class="text-sm font-semibold">选择成本分析号查看</h2>
+                    <p id="sheetStatus" class="text-xs text-gray-400"></p>
+                </div>
+                <div id="sheetActions" class="hidden items-center gap-3">
+                    <span id="saveStatus" class="text-xs text-gray-400"></span>
+                    <button class="text-sm text-blue-600 hover:text-blue-800" onclick="exportExcel()">导出 Excel</button>
+                    <button id="editBtn" class="text-sm text-blue-600 hover:text-blue-800" onclick="enableEditing()">编辑</button>
+                    <button id="saveBtn" class="hidden text-sm text-green-600 hover:text-green-800" onclick="saveChanges()">保存</button>
+                    <button id="cancelBtn" class="hidden text-sm text-gray-500 hover:text-gray-700" onclick="cancelEditing()">取消</button>
+                    <button id="quoteBtn" class="text-sm text-orange-600 hover:text-orange-800" onclick="markQuoted()">标记已报价</button>
+                </div>
+            </div>
+            <div id="emptyState" class="flex flex-1 items-center justify-center text-sm text-gray-400">从左右列表中选择一条报价单</div>
+            <div id="sheetLoading" class="hidden flex flex-1 items-center justify-center text-sm text-gray-400">正在加载数据库内容...</div>
+            <iframe id="sheetFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="成本分析表"></iframe>
+        </section>
+
+        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
+            <div class="border-b p-3">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-green-700">已报价</h2>
+                    <span id="quotedCount" class="text-xs text-gray-400">0</span>
+                </div>
+                <input id="quotedSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-green-400" placeholder="搜索成本分析号..." oninput="renderLists()">
+            </div>
+            <div id="quotedList" class="flex-1 overflow-y-auto p-2"></div>
+        </aside>
+    </main>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        const role = sessionStorage.getItem('role');
+        if (!token) window.location.href = '/static/login.html';
+        if (role !== 'reviewer') window.location.href = '/static/index.html';
+
+        document.getElementById('reviewerName').textContent =
+            (sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '') + ' · 审价科';
+
+        let pendingItems = [];
+        let quotedItems = [];
+        let selectedCode = '';
+        let selectedStatus = '';
+
+        function logout() {
+            sessionStorage.clear();
+            window.location.href = '/static/login.html';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        function formatUploadTime(value) {
+            return value ? value.replace('T', ' ').substring(0, 19) : '-';
+        }
+
+        async function loadHistory() {
+            const res = await fetch('/api/v1/etl/review/history', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '加载失败');
+            pendingItems = data.pending || [];
+            quotedItems = data.quoted || [];
+            renderLists();
+        }
+
+        function renderLists() {
+            renderList('pendingList', pendingItems, document.getElementById('pendingSearch').value, 'pending');
+            renderList('quotedList', quotedItems, document.getElementById('quotedSearch').value, 'quoted');
+            document.getElementById('pendingCount').textContent = pendingItems.length;
+            document.getElementById('quotedCount').textContent = quotedItems.length;
+        }
+
+        function renderList(elementId, items, keyword, status) {
+            const filtered = items.filter(item =>
+                (item.quotation_code || '').toUpperCase().includes((keyword || '').trim().toUpperCase())
+            );
+            const element = document.getElementById(elementId);
+            if (!filtered.length) {
+                element.innerHTML = '<div class="py-4 text-center text-xs text-gray-400">暂无记录</div>';
+                return;
+            }
+            element.innerHTML = filtered.map(item => {
+                const active = item.quotation_code === selectedCode ? ' border-blue-400 bg-blue-50' : ' border-gray-200 hover:bg-gray-50';
+                return '<button class="mb-2 w-full border p-2 text-left' + active + '" onclick="selectQuotation(\'' +
+                    encodeURIComponent(item.quotation_code) + '\', \'' + status + '\')">' +
+                    '<span class="block truncate font-mono text-xs text-gray-800">' + escapeHtml(item.quotation_code) + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">' + escapeHtml(item.customer_name + ' ' + item.product_spec) + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">上传人：' + escapeHtml(item.upload_user) + '</span>' +
+                    '<span class="mt-1 block font-mono text-xs text-gray-500">上传时间：' + escapeHtml(formatUploadTime(item.create_time)) + '</span>' +
+                '</button>';
+            }).join('');
+        }
+
+        async function selectQuotation(encodedCode, status) {
+            selectedCode = decodeURIComponent(encodedCode);
+            selectedStatus = status;
+            renderLists();
+            resetToolbar();
+            document.getElementById('emptyState').classList.add('hidden');
+            document.getElementById('sheetFrame').classList.add('hidden');
+            document.getElementById('sheetLoading').classList.remove('hidden');
+            document.getElementById('sheetTitle').textContent = selectedCode;
+            document.getElementById('sheetStatus').textContent = status === 'quoted' ? '已报价 · 只读' : '待报价 · 可编辑';
+            document.getElementById('sheetActions').classList.remove('hidden');
+            document.getElementById('sheetActions').classList.add('flex');
+            document.getElementById('editBtn').classList.toggle('hidden', status === 'quoted');
+            document.getElementById('quoteBtn').classList.toggle('hidden', status === 'quoted');
+            try {
+                const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(selectedCode), {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '加载失败'); }
+                document.getElementById('sheetFrame').srcdoc = await res.text();
+                document.getElementById('sheetLoading').classList.add('hidden');
+                document.getElementById('sheetFrame').classList.remove('hidden');
+            } catch (err) {
+                document.getElementById('sheetLoading').textContent = '加载失败：' + err.message;
+            }
+        }
+
+        function resetToolbar() {
+            document.getElementById('editBtn').classList.remove('hidden');
+            document.getElementById('saveBtn').classList.add('hidden');
+            document.getElementById('cancelBtn').classList.add('hidden');
+            document.getElementById('saveStatus').textContent = '';
+        }
+
+        function enableEditing() {
+            if (selectedStatus === 'quoted') return;
+            document.getElementById('sheetFrame').contentDocument.querySelectorAll('.sheet-input')
+                .forEach(input => { input.disabled = false; });
+            document.getElementById('editBtn').classList.add('hidden');
+            document.getElementById('saveBtn').classList.remove('hidden');
+            document.getElementById('cancelBtn').classList.remove('hidden');
+            document.getElementById('saveStatus').textContent = '编辑中';
+        }
+
+        function cancelEditing() {
+            if (selectedCode) selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+        }
+
+        async function saveChanges() {
+            const inputs = document.getElementById('sheetFrame').contentDocument.querySelectorAll('.sheet-input');
+            const changes = Array.from(inputs).filter(input => input.value !== input.defaultValue).map(input => ({
+                entity: input.dataset.entity,
+                id: Number(input.dataset.id),
+                field: input.dataset.field,
+                value: input.value,
+            }));
+            if (!changes.length) {
+                document.getElementById('saveStatus').textContent = '没有修改';
+                return;
+            }
+            const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(selectedCode), {
+                method: 'PATCH',
+                headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ changes }),
+            });
+            const data = await res.json();
+            if (!res.ok) return alert('保存失败：' + (data.detail || '未知错误'));
+            selectedCode = data.quotation_code;
+            await loadHistory();
+            await selectQuotation(encodeURIComponent(selectedCode), 'pending');
+            document.getElementById('saveStatus').textContent = '已保存';
+        }
+
+        async function markQuoted() {
+            if (!selectedCode || !confirm('确认将 ' + selectedCode + ' 标记为已报价吗？标记后将只能查看。')) return;
+            const res = await fetch('/api/v1/etl/quotation/review-status?code=' + encodeURIComponent(selectedCode), {
+                method: 'PATCH',
+                headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'quoted' }),
+            });
+            const data = await res.json();
+            if (!res.ok) return alert('标记失败：' + (data.detail || '未知错误'));
+            await loadHistory();
+            await selectQuotation(encodeURIComponent(selectedCode), 'quoted');
+        }
+
+        async function exportExcel() {
+            if (!selectedCode) return;
+            const res = await fetch('/api/v1/etl/quotation/export?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            if (!res.ok) { const d = await res.json(); return alert('导出失败：' + (d.detail || '未知错误')); }
+            const url = URL.createObjectURL(await res.blob());
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = selectedCode + '.xlsx';
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        loadHistory().catch(err => alert('加载失败：' + err.message));
+    </script>
+</body>
+</html>

@@ -28,7 +28,9 @@
     </div>
 
     <script>
-        if (sessionStorage.getItem('token')) { window.location.href = '/static/index.html'; }
+        if (sessionStorage.getItem('token')) {
+            window.location.href = sessionStorage.getItem('role') === 'reviewer' ? '/static/review.html' : '/static/index.html';
+        }
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const errorDiv = document.getElementById('loginError');
@@ -52,7 +54,8 @@
                 sessionStorage.setItem('userName', data.username);
                 sessionStorage.setItem('displayName', data.display_name || data.username);
                 sessionStorage.setItem('isAdmin', data.is_admin ? '1' : '');
-                window.location.href = '/static/index.html';
+                sessionStorage.setItem('role', data.role || 'engineering');
+                window.location.href = data.role === 'reviewer' ? '/static/review.html' : '/static/index.html';
             } catch (err) {
                 errorDiv.textContent = err.message;
                 errorDiv.classList.remove('hidden');

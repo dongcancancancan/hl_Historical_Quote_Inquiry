@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # LLM 最大并发数
     LLM_MAX_CONCURRENCY: int = 5
 
+    # 审价科账号（仍使用 BPM / 本地用户表进行密码认证）
+    REVIEWER_USERNAMES: str = "EG253100,EG199214"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property
@@ -43,6 +46,10 @@ class Settings(BaseSettings):
                 "\n  ⚠ JWT_SECRET 仍为默认值！请在 .env 中设置 JWT_SECRET=<随机密钥>\n"
                 "  生成方式: python -c \"import secrets; print(secrets.token_hex(32))\""
             )
+
+    @property
+    def reviewer_usernames(self) -> set[str]:
+        return {name.strip().upper() for name in self.REVIEWER_USERNAMES.split(",") if name.strip()}
 
 
 settings = Settings()

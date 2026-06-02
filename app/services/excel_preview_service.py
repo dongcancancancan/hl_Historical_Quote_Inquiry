@@ -1,4 +1,5 @@
 import html
+import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -62,6 +63,9 @@ PROCESS_FIELDS = {
     "subtotal_fee": "decimal",
 }
 
+REVIEW_PENDING = "pending"
+REVIEW_QUOTED = "quoted"
+
 
 def get_accessible_quotation(
     db: Session,
@@ -69,15 +73,60 @@ def get_accessible_quotation(
     tenant_id: str,
     creator_name: str,
     is_admin: bool = False,
+    is_reviewer: bool = False,
 ) -> QuotationMain | None:
     filters = [
         QuotationMain.quotation_code == quotation_code,
-        QuotationMain.tenant_id == tenant_id,
         QuotationMain.deleted == False,
     ]
-    if not is_admin:
+    if not is_reviewer:
+        filters.append(QuotationMain.tenant_id == tenant_id)
+    if not is_admin and not is_reviewer:
         filters.append(QuotationMain.creator == creator_name)
     return db.query(QuotationMain).filter(*filters).first()
+
+
+def get_review_status(quotation: QuotationMain) -> str:
+    return get_review_status_from_tags(quotation.extracted_tags)
+
+
+def get_review_status_from_tags(raw_tags: str | None) -> str:
+    tags = _load_tags(raw_tags)
+    return REVIEW_QUOTED if tags.get("review_status") == REVIEW_QUOTED else REVIEW_PENDING
+
+
+def set_review_status(db: Session, quotation: QuotationMain, status: str, updater: str) -> str:
+    if status not in {REVIEW_PENDING, REVIEW_QUOTED}:
+        raise ValueError("无效的报价状态")
+    tags = _load_tags(quotation.extracted_tags)
+    tags["review_status"] = status
+    quotation.extracted_tags = json.dumps(tags, ensure_ascii=False)
+    quotation.updater = updater
+    quotation.update_time = datetime.now()
+    db.commit()
+    return status
+
+
+def get_review_history(db: Session, limit: int = 1000) -> dict[str, list[dict]]:
+    quotations = (
+        db.query(QuotationMain)
+        .filter(QuotationMain.deleted == False)
+        .order_by(QuotationMain.create_time.desc())
+        .limit(limit)
+        .all()
+    )
+    history = {REVIEW_PENDING: [], REVIEW_QUOTED: []}
+    for quotation in quotations:
+        status = get_review_status(quotation)
+        history[status].append({
+            "quotation_code": quotation.quotation_code,
+            "customer_name": quotation.customer_name or "",
+            "product_spec": quotation.product_spec or "",
+            "upload_user": quotation.creator or "",
+            "create_time": quotation.create_time.isoformat() if quotation.create_time else None,
+            "review_status": status,
+        })
+    return history
 
 
 def update_quotation_fields(
@@ -86,6 +135,8 @@ def update_quotation_fields(
     changes: list[dict],
     updater: str,
 ) -> str:
+    if get_review_status(quotation) == REVIEW_QUOTED:
+        raise ValueError("该成本分析表已报价，只能查看，不能修改")
     now = datetime.now()
     materials = {item.id: item for item in quotation.materials if not item.deleted}
     processes = {item.id: item for item in quotation.processes if not item.deleted}
@@ -139,6 +190,14 @@ def update_quotation_fields(
     quotation.update_time = now
     db.commit()
     return quotation.quotation_code
+
+
+def _load_tags(raw_tags: str | None) -> dict:
+    try:
+        tags = json.loads(raw_tags or "{}")
+        return tags if isinstance(tags, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
 
 
 def _parse_update_value(raw_value, field_type: str):

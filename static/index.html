@@ -77,6 +77,7 @@
                 <div class="flex items-center gap-3">
                     <span class="text-xs text-gray-400">数据库实时渲染</span>
                     <span id="previewSaveStatus" class="text-xs text-gray-400"></span>
+                    <button id="previewExportBtn" class="text-sm text-blue-600 hover:text-blue-800" onclick="exportPreviewExcel()">导出 Excel</button>
                     <button id="previewEditBtn" class="text-sm text-blue-600 hover:text-blue-800" onclick="enablePreviewEditing()">编辑</button>
                     <button id="previewSaveBtn" class="hidden text-sm text-green-600 hover:text-green-800" onclick="savePreviewChanges()">保存</button>
                     <button id="previewCancelBtn" class="hidden text-sm text-gray-500 hover:text-gray-700" onclick="cancelPreviewEditing()">取消</button>
@@ -93,6 +94,7 @@
         const displayName = sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '';
         const isAdmin = sessionStorage.getItem('isAdmin') === '1';
         if (!token) { window.location.href = '/static/login.html'; }
+        if (sessionStorage.getItem('role') === 'reviewer') { window.location.href = '/static/review.html'; }
 
         // 时间问候语 + 头像
         (function renderGreeting() {
@@ -194,7 +196,8 @@
                         '<div class="flex items-center gap-2 shrink-0">' +
                             uploader +
                             '<span class="text-xs text-gray-400">' + time + '</span>' +
-                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>' +
+                            (it.review_status === 'quoted' ? '<span class="text-xs text-green-600">已报价</span>' :
+                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>') +
                         '</div>' +
                     '</div>';
                 }).join('');
@@ -227,12 +230,14 @@
         }
 
         let previewQuotationCode = '';
+        let previewReviewStatus = 'pending';
 
         async function previewQuotation(code) {
             const modal = document.getElementById('previewModal');
             const loading = document.getElementById('previewLoading');
             const frame = document.getElementById('previewFrame');
             previewQuotationCode = code;
+            previewReviewStatus = historyData.flatMap(group => group.items).find(item => item.quotation_code === code)?.review_status || 'pending';
             document.getElementById('previewCode').textContent = code;
             modal.classList.remove('hidden');
             loading.classList.remove('hidden');
@@ -240,6 +245,7 @@
             frame.classList.add('hidden');
             frame.removeAttribute('srcdoc');
             resetPreviewToolbar();
+            document.getElementById('previewEditBtn').classList.toggle('hidden', previewReviewStatus === 'quoted');
 
             try {
                 const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(code), {
@@ -262,13 +268,14 @@
         }
 
         function resetPreviewToolbar() {
-            document.getElementById('previewEditBtn').classList.remove('hidden');
+            document.getElementById('previewEditBtn').classList.toggle('hidden', previewReviewStatus === 'quoted');
             document.getElementById('previewSaveBtn').classList.add('hidden');
             document.getElementById('previewCancelBtn').classList.add('hidden');
             document.getElementById('previewSaveStatus').textContent = '';
         }
 
         function enablePreviewEditing() {
+            if (previewReviewStatus === 'quoted') return;
             const frame = document.getElementById('previewFrame');
             const inputs = frame.contentDocument.querySelectorAll('.sheet-input');
             inputs.forEach(input => { input.disabled = false; });
@@ -324,6 +331,28 @@
                 alert('保存失败: ' + err.message);
             } finally {
                 saveBtn.disabled = false;
+            }
+        }
+
+        async function exportPreviewExcel() {
+            if (!previewQuotationCode) return;
+            const btn = document.getElementById('previewExportBtn');
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/v1/etl/quotation/export?code=' + encodeURIComponent(previewQuotationCode), {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '导出失败'); }
+                const url = URL.createObjectURL(await res.blob());
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = previewQuotationCode + '.xlsx';
+                link.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert('导出失败: ' + err.message);
+            } finally {
+                btn.disabled = false;
             }
         }
 

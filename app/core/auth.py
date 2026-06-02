@@ -19,6 +19,11 @@ class UserContext:
     tenant_name: str
     display_name: str
     is_admin: bool = False
+    role: str = "engineering"
+
+    @property
+    def is_reviewer(self) -> bool:
+        return self.role == "reviewer"
 
 
 def hash_password(password: str) -> str:
@@ -40,6 +45,10 @@ def verify_password(password: str, stored: str) -> bool:
     return hashlib.sha256((salt + password).encode()).hexdigest() == h
 
 
+def get_user_role(username: str) -> str:
+    return "reviewer" if username.upper() in settings.reviewer_usernames else "engineering"
+
+
 def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str, display_name: str = "", is_admin: bool = False) -> str:
     payload = {
         "user_id": user_id,
@@ -48,6 +57,7 @@ def create_token(user_id: int, username: str, tenant_code: str, tenant_name: str
         "tenant_name": tenant_name,
         "display_name": display_name or username,
         "is_admin": is_admin,
+        "role": get_user_role(username),
         "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS),
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
@@ -63,6 +73,7 @@ def decode_token(token: str) -> UserContext:
             tenant_name=payload["tenant_name"],
             display_name=payload.get("display_name", payload["username"]),
             is_admin=payload.get("is_admin", False),
+            role=payload.get("role", get_user_role(payload["username"])),
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")

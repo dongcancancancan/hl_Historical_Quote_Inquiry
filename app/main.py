@@ -2,7 +2,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from app.routers import etl_router, auth_router
+from app.routers import etl_router, auth_router, copper_fees_router, pvc_material_prices_router
 from app.core.config import settings
 
 # 配置日志：INFO 级别以上输出到终端
@@ -21,6 +21,8 @@ app = FastAPI(
 # 注册路由
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["认证服务"])
 app.include_router(etl_router, prefix="/api/v1/etl", tags=["数据入库管道"])
+app.include_router(copper_fees_router, prefix="/api/v1/copper-fees", tags=["铜加工费基础数据"])
+app.include_router(pvc_material_prices_router, prefix="/api/v1/pvc-material-prices", tags=["PVC 材料价格基础数据"])
 
 # 挂载前端静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")

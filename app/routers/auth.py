@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.user import Tenant, User, Sys_BPMUser
-from app.core.auth import hash_password, hash_password_md5, verify_password, create_token
+from app.core.auth import hash_password, hash_password_md5, verify_password, create_token, get_user_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,6 +62,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
         "username": user.username,
         "display_name": display_name,
         "is_admin": bool(user.is_admin),
+        "role": get_user_role(user.username),
     }
 
 
@@ -80,6 +81,7 @@ def _authenticate_local(db: Session, username: str, password: str):
                 "username": user.username,
                 "display_name": display_name,
                 "is_admin": bool(user.is_admin),
+                "role": get_user_role(user.username),
             }
     return None
 
@@ -135,6 +137,7 @@ def _authenticate_bpm(db: Session, username: str, password: str):
         "username": username,
         "display_name": display_name,
         "is_admin": bool(local_user.is_admin),
+        "role": get_user_role(username),
     }
 
 

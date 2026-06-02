@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>铜加工费维护</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 font-sans text-gray-800">
+    <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
+        <div class="flex items-center gap-4">
+            <a href="/static/review.html" class="text-sm text-blue-600 hover:text-blue-800">返回审价科工作台</a>
+            <h1 class="text-base font-semibold">铜加工费基础数据</h1>
+        </div>
+        <span id="reviewerName" class="text-sm text-gray-500"></span>
+    </header>
+
+    <main class="mx-auto max-w-7xl p-4">
+        <section class="mb-3 border bg-white p-3 shadow-sm">
+            <div class="flex flex-wrap items-center gap-3">
+                <select id="typeFilter" class="border px-2 py-1.5 text-sm" onchange="loadFees()">
+                    <option value="">全部类型</option>
+                    <option value="BC">BC 裸铜</option>
+                    <option value="TC">TC 镀锡铜</option>
+                </select>
+                <input id="keyword" class="border px-2 py-1.5 text-sm" placeholder="按线径查询，例如 0.196" oninput="loadFees()">
+                <label class="flex items-center gap-1 text-sm text-gray-500"><input id="includeDisabled" type="checkbox" onchange="loadFees()">显示停用</label>
+                <button class="border bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700" onclick="openEditor()">新增</button>
+                <label class="cursor-pointer border px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50">
+                    导入 Excel<input id="importFile" type="file" accept=".xlsx" class="hidden" onchange="importExcel()">
+                </label>
+            </div>
+        </section>
+
+        <section class="mb-3 border bg-white p-3 shadow-sm">
+            <div class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-semibold">物料编码试算</span>
+                <input id="matchCode" class="border px-2 py-1.5 text-sm" placeholder="例如 0.196BC">
+                <button class="border px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50" onclick="matchCode()">查询</button>
+                <span id="matchResult" class="text-sm text-gray-500"></span>
+            </div>
+        </section>
+
+        <section class="overflow-x-auto border bg-white shadow-sm">
+            <table class="w-full min-w-[980px] border-collapse text-sm">
+                <thead class="bg-gray-100 text-left">
+                    <tr>
+                        <th class="border-b px-3 py-2">类型</th>
+                        <th class="border-b px-3 py-2">线径</th>
+                        <th class="border-b px-3 py-2">锡价段</th>
+                        <th class="border-b px-3 py-2">加工费</th>
+                        <th class="border-b px-3 py-2">最低加工费</th>
+                        <th class="border-b px-3 py-2">状态</th>
+                        <th class="border-b px-3 py-2">更新人</th>
+                        <th class="border-b px-3 py-2">更新时间</th>
+                        <th class="border-b px-3 py-2">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="feeRows"></tbody>
+            </table>
+        </section>
+    </main>
+
+    <div id="editorModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4">
+        <form class="w-full max-w-lg border bg-white p-5 shadow-xl" onsubmit="saveFee(event)">
+            <h2 id="editorTitle" class="mb-4 text-base font-semibold">新增铜加工费</h2>
+            <input id="feeId" type="hidden">
+            <div class="grid grid-cols-2 gap-3">
+                <label class="text-sm">类型<select id="copperType" class="mt-1 w-full border px-2 py-1.5" required onchange="toggleTinBasis()"><option value="BC">BC 裸铜</option><option value="TC">TC 镀锡铜</option></select></label>
+                <label class="text-sm">线径<input id="diameter" class="mt-1 w-full border px-2 py-1.5" required></label>
+                <label class="text-sm">锡价段<input id="tinBasis" class="mt-1 w-full border px-2 py-1.5" value="0"></label>
+                <label class="text-sm">加工费<input id="processingFee" class="mt-1 w-full border px-2 py-1.5" required></label>
+                <label class="text-sm">最低加工费<input id="minimumFee" class="mt-1 w-full border px-2 py-1.5"></label>
+                <label class="text-sm">备注<input id="remark" class="mt-1 w-full border px-2 py-1.5"></label>
+            </div>
+            <label class="mt-3 flex items-center gap-2 text-sm"><input id="enabled" type="checkbox" checked>启用</label>
+            <div class="mt-5 flex justify-end gap-3">
+                <button type="button" class="text-sm text-gray-500" onclick="closeEditor()">取消</button>
+                <button class="border bg-blue-600 px-4 py-1.5 text-sm text-white">保存</button>
+            </div>
+        </form>
+    </div>
+
+    <div id="logsModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4">
+        <div class="max-h-[80vh] w-full max-w-4xl overflow-auto border bg-white p-5 shadow-xl">
+            <div class="mb-3 flex justify-between"><h2 class="font-semibold">操作日志</h2><button onclick="closeLogs()">×</button></div>
+            <div id="logRows" class="space-y-2 text-xs"></div>
+        </div>
+    </div>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        if (!token) window.location.href = '/static/login.html';
+        if (sessionStorage.getItem('role') !== 'reviewer') window.location.href = '/static/index.html';
+        document.getElementById('reviewerName').textContent = sessionStorage.getItem('displayName') || '';
+        let fees = [];
+
+        function headers(json = false) {
+            const value = { 'Authorization': 'Bearer ' + token };
+            if (json) value['Content-Type'] = 'application/json';
+            return value;
+        }
+        function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str ?? ''; return div.innerHTML; }
+        async function loadFees() {
+            const params = new URLSearchParams({
+                copper_type: document.getElementById('typeFilter').value,
+                keyword: document.getElementById('keyword').value.trim(),
+                include_disabled: document.getElementById('includeDisabled').checked,
+            });
+            const res = await fetch('/api/v1/copper-fees?' + params, { headers: headers() });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '加载失败');
+            fees = data.items;
+            document.getElementById('feeRows').innerHTML = fees.map(item => '<tr class="border-b">' +
+                '<td class="px-3 py-2 font-semibold">' + item.copper_type + '</td>' +
+                '<td class="px-3 py-2 font-mono">' + item.diameter + '</td>' +
+                '<td class="px-3 py-2 font-mono">' + (item.copper_type === 'TC' ? item.tin_price_basis : '-') + '</td>' +
+                '<td class="px-3 py-2 font-mono">' + item.processing_fee + '</td>' +
+                '<td class="px-3 py-2 font-mono">' + (item.minimum_fee ?? '') + '</td>' +
+                '<td class="px-3 py-2">' + (item.enabled ? '<span class="text-green-600">启用</span>' : '<span class="text-gray-400">停用</span>') + '</td>' +
+                '<td class="px-3 py-2">' + escapeHtml(item.updater || item.creator) + '</td>' +
+                '<td class="px-3 py-2 text-xs text-gray-500">' + (item.update_time || '').replace('T', ' ').substring(0, 19) + '</td>' +
+                '<td class="px-3 py-2"><button class="mr-2 text-blue-600" onclick="openEditor(' + item.id + ')">编辑</button>' +
+                '<button class="mr-2 text-gray-600" onclick="showLogs(' + item.id + ')">日志</button>' +
+                (item.enabled ? '<button class="text-red-500" onclick="disableFee(' + item.id + ')">停用</button>' : '') + '</td></tr>').join('');
+        }
+        function openEditor(id = null) {
+            const item = fees.find(value => value.id === id);
+            document.getElementById('editorTitle').textContent = item ? '编辑铜加工费' : '新增铜加工费';
+            document.getElementById('feeId').value = item?.id || '';
+            document.getElementById('copperType').value = item?.copper_type || 'BC';
+            document.getElementById('diameter').value = item?.diameter || '';
+            document.getElementById('tinBasis').value = item?.tin_price_basis || '0';
+            document.getElementById('processingFee').value = item?.processing_fee || '';
+            document.getElementById('minimumFee').value = item?.minimum_fee || '';
+            document.getElementById('remark').value = item?.remark || '';
+            document.getElementById('enabled').checked = item?.enabled ?? true;
+            toggleTinBasis();
+            document.getElementById('editorModal').classList.replace('hidden', 'flex');
+        }
+        function closeEditor() { document.getElementById('editorModal').classList.replace('flex', 'hidden'); }
+        function toggleTinBasis() {
+            const tc = document.getElementById('copperType').value === 'TC';
+            document.getElementById('tinBasis').disabled = !tc;
+            if (!tc) document.getElementById('tinBasis').value = '0';
+            if (tc && document.getElementById('tinBasis').value === '0') document.getElementById('tinBasis').value = '350';
+        }
+        async function saveFee(event) {
+            event.preventDefault();
+            const id = document.getElementById('feeId').value;
+            const body = {
+                copper_type: document.getElementById('copperType').value,
+                diameter: document.getElementById('diameter').value,
+                tin_price_basis: document.getElementById('tinBasis').value,
+                processing_fee: document.getElementById('processingFee').value,
+                minimum_fee: document.getElementById('minimumFee').value,
+                remark: document.getElementById('remark').value,
+                enabled: document.getElementById('enabled').checked,
+            };
+            const res = await fetch('/api/v1/copper-fees' + (id ? '/' + id : ''), { method: id ? 'PATCH' : 'POST', headers: headers(true), body: JSON.stringify(body) });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '保存失败');
+            closeEditor(); loadFees();
+        }
+        async function disableFee(id) {
+            if (!confirm('确认停用该铜加工费记录吗？')) return;
+            const res = await fetch('/api/v1/copper-fees/' + id, { method: 'DELETE', headers: headers() });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '停用失败');
+            loadFees();
+        }
+        async function matchCode() {
+            const code = document.getElementById('matchCode').value.trim();
+            const res = await fetch('/api/v1/copper-fees/match?material_code=' + encodeURIComponent(code), { headers: headers() });
+            const data = await res.json();
+            const result = document.getElementById('matchResult');
+            if (!res.ok) return result.textContent = data.detail || '查询失败';
+            result.textContent = data.matched ? '命中：' + data.copper_type + ' ' + data.diameter + '，加工费 ' + data.fee.processing_fee : '未命中：请维护该线径档位';
+        }
+        async function showLogs(id) {
+            const res = await fetch('/api/v1/copper-fees/' + id + '/logs', { headers: headers() });
+            const data = await res.json();
+            document.getElementById('logRows').innerHTML = data.items.map(log => '<div class="border p-2"><b>' + log.action + '</b> · ' + escapeHtml(log.operator) + ' · ' + (log.operate_time || '').replace('T', ' ').substring(0, 19) + '<pre class="mt-1 overflow-auto text-gray-500">' + escapeHtml(JSON.stringify({ before: log.before_data, after: log.after_data }, null, 2)) + '</pre></div>').join('');
+            document.getElementById('logsModal').classList.replace('hidden', 'flex');
+        }
+        function closeLogs() { document.getElementById('logsModal').classList.replace('flex', 'hidden'); }
+        async function importExcel() {
+            const file = document.getElementById('importFile').files[0];
+            if (!file) return;
+            const form = new FormData(); form.append('file', file);
+            const res = await fetch('/api/v1/copper-fees/import/excel', { method: 'POST', headers: headers(), body: form });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '导入失败');
+            alert('导入完成：新增 ' + data.created + ' 条，更新 ' + data.updated + ' 条');
+            document.getElementById('importFile').value = ''; loadFees();
+        }
+        loadFees();
+    </script>
+</body>
+</html>

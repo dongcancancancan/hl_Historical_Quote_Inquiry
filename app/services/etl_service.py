@@ -636,6 +636,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
             func.cast(QuotationMain.create_time, Date).label("create_date"),
             QuotationMain.create_time,
             QuotationMain.original_file_path,
+            QuotationMain.extracted_tags,
         )
         .filter(*filters)
         .order_by(QuotationMain.create_time.desc())
@@ -646,7 +647,8 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
     # 按日期分组
     from collections import OrderedDict
     groups = OrderedDict()
-    for code, customer, spec, creator, create_date, create_time, path in rows:
+    for code, customer, spec, creator, create_date, create_time, path, extracted_tags in rows:
+        from app.services.excel_preview_service import get_review_status_from_tags
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
@@ -657,6 +659,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
             "upload_user": creator or "",
             "create_time": create_time.isoformat() if create_time else None,
             "filename": os.path.basename(path) if path else "",
+            "review_status": get_review_status_from_tags(extracted_tags),
         })
 
     return [
@@ -677,6 +680,9 @@ def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_n
 
     q = db.query(QuotationMain).filter(*filters).first()
     if not q:
+        return False
+    from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
+    if get_review_status(q) == REVIEW_QUOTED:
         return False
     db.delete(q)
     db.commit()

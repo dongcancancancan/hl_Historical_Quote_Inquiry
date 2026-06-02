@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import logging
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -13,9 +14,13 @@ from app.core.auth import UserContext, get_current_user
 from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
 from app.services.excel_preview_service import (
     get_accessible_quotation,
+    get_review_history,
+    get_review_status,
     render_quotation_preview,
+    set_review_status,
     update_quotation_fields,
 )
+from app.services.excel_service import render_quotation_excel
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,6 +41,10 @@ class QuotationUpdateRequest(BaseModel):
     changes: list[QuotationFieldChange]
 
 
+class QuotationReviewStatusRequest(BaseModel):
+    status: str
+
+
 @router.post("/upload_excel")
 async def upload_and_process_excel(
     file: UploadFile = File(...),
@@ -44,6 +53,8 @@ async def upload_and_process_excel(
     request: Request = None,
 ):
     """上传 Excel，扫描后通过 SSE 流式返回处理进度"""
+    if user.is_reviewer:
+        raise HTTPException(status_code=403, detail="审价科账号不允许上传成本分析表")
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .xls 格式的文件")
 
@@ -122,6 +133,17 @@ def upload_history(
     return {"history": history}
 
 
+@router.get("/review/history")
+def review_history(
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """审价科工作台：返回全库待报价和已报价列表。"""
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看")
+    return get_review_history(db)
+
+
 @router.delete("/quotation")
 def remove_quotation(
     code: str,
@@ -142,7 +164,7 @@ def preview_quotation(
     user: UserContext = Depends(get_current_user),
 ):
     """按成本分析号查询数据库并返回成本分析表网页预览。"""
-    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin)
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
     if not quotation:
         raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
     try:
@@ -160,7 +182,7 @@ def update_quotation(
     user: UserContext = Depends(get_current_user),
 ):
     """批量更新成本分析表字段，不重新调用 LLM。"""
-    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin)
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
     if not quotation:
         raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限修改")
     try:
@@ -178,3 +200,47 @@ def update_quotation(
         db.rollback()
         logger.exception("Quotation update failed for %s", code)
         raise HTTPException(status_code=500, detail="成本分析表更新失败")
+
+
+@router.patch("/quotation/review-status")
+def update_review_status(
+    code: str,
+    req: QuotationReviewStatusRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """审价科标记待报价 / 已报价状态。"""
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以修改报价状态")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, True)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号")
+    try:
+        status = set_review_status(db, quotation, req.status, user.display_name)
+        return {"ok": True, "quotation_code": quotation.quotation_code, "review_status": status}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/export")
+def export_quotation(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    """按成本分析号从数据库生成并下载 Excel。"""
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限导出")
+    try:
+        buffer = render_quotation_excel(quotation)
+        encoded_filename = quote(f"{quotation.quotation_code}.xlsx")
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
+        )
+    except Exception:
+        logger.exception("Quotation export failed for %s", code)
+        raise HTTPException(status_code=500, detail="成本分析表导出失败")
