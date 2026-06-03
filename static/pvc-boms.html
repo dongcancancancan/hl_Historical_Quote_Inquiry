@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>PVC 母料 BOM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .bom-table th, .bom-table td { border: 1px solid #222; padding: 3px 6px; }
+        .bom-table th { background: #f2f2f2; font-weight: 600; }
+        .bom-table .price-head { background: #00ff22; }
+        .bom-table .price-cell { background: #fff799; }
+        .bom-table .fee-label { background: #f5b7d6; }
+    </style>
+</head>
+<body class="h-screen overflow-hidden bg-gray-100 font-sans text-gray-800">
+    <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
+        <div class="flex items-center gap-4">
+            <a href="/static/review.html" class="text-sm text-blue-600 hover:text-blue-800">返回审价科工作台</a>
+            <h1 class="text-base font-semibold">PVC 母料 BOM</h1>
+        </div>
+        <span id="reviewerName" class="text-sm text-gray-500"></span>
+    </header>
+
+    <main class="grid h-[calc(100vh-56px)] grid-cols-[420px_minmax(0,1fr)] gap-3 p-3">
+        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
+            <div class="border-b p-3">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold">C 开头母料</h2>
+                    <span id="bomCount" class="text-xs text-gray-400">0</span>
+                </div>
+                <input id="keyword" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-blue-400" placeholder="搜索母件代号或名称" oninput="loadBoms()">
+            </div>
+            <div id="bomRows" class="flex-1 overflow-y-auto p-2"></div>
+        </aside>
+
+        <section class="flex min-h-0 min-w-0 flex-col border bg-white shadow-sm">
+            <div class="flex h-14 items-center justify-between border-b px-4">
+                <div>
+                    <h2 id="detailTitle" class="text-sm font-semibold">选择左侧母料查看 BOM</h2>
+                    <p id="detailMeta" class="text-xs text-gray-400"></p>
+                </div>
+                <div id="feeActions" class="hidden items-center gap-2">
+                    <label class="text-xs text-gray-500">加工费
+                        <select id="processFee" class="ml-1 border px-2 py-1 text-xs" onchange="toggleCustomFee('process')">
+                            <option value="0.50">0.50</option>
+                            <option value="0.65">0.65</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                    </label>
+                    <input id="processCustom" type="number" min="0" step="0.0001" class="hidden w-20 border px-2 py-1 text-xs">
+                    <label class="text-xs text-gray-500">包装费
+                        <select id="packageFee" class="ml-1 border px-2 py-1 text-xs" onchange="toggleCustomFee('package')">
+                            <option value="0.04">0.04</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                    </label>
+                    <input id="packageCustom" type="number" min="0" step="0.0001" class="hidden w-20 border px-2 py-1 text-xs">
+                    <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveFees()">保存费用</button>
+                    <span id="saveStatus" class="text-xs text-gray-400"></span>
+                </div>
+            </div>
+            <div id="emptyState" class="flex flex-1 items-center justify-center text-sm text-gray-400">从左侧选择一个 C 开头母料</div>
+            <div id="detailLoading" class="hidden flex flex-1 items-center justify-center text-sm text-gray-400">正在加载 BOM...</div>
+            <div id="detailPanel" class="hidden flex-1 overflow-auto p-4"></div>
+        </section>
+    </main>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        if (!token) window.location.href = '/static/login.html';
+        if (sessionStorage.getItem('role') !== 'reviewer') window.location.href = '/static/index.html';
+        document.getElementById('reviewerName').textContent = sessionStorage.getItem('displayName') || '';
+
+        let boms = [];
+        let selectedBom = '';
+        let selectedDetail = null;
+
+        function headers(json = false) {
+            const value = { 'Authorization': 'Bearer ' + token };
+            if (json) value['Content-Type'] = 'application/json';
+            return value;
+        }
+        function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str ?? ''; return div.innerHTML; }
+        function numberText(value, digits = 2) {
+            if (value === null || value === undefined || value === '') return '';
+            const num = Number(value);
+            return Number.isFinite(num) ? num.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : value;
+        }
+        function compactNumber(value) {
+            if (value === null || value === undefined || value === '') return '';
+            const num = Number(value);
+            return Number.isFinite(num) ? String(Number(num.toFixed(6))) : value;
+        }
+
+        async function loadBoms() {
+            const keyword = document.getElementById('keyword').value.trim();
+            const res = await fetch('/api/v1/pvc-boms?keyword=' + encodeURIComponent(keyword), { headers: headers() });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '加载失败');
+            boms = data.items || [];
+            document.getElementById('bomCount').textContent = boms.length;
+            renderBomRows();
+        }
+
+        function renderBomRows() {
+            const rows = document.getElementById('bomRows');
+            if (!boms.length) {
+                rows.innerHTML = '<div class="py-6 text-center text-xs text-gray-400">暂无母料 BOM</div>';
+                return;
+            }
+            rows.innerHTML = boms.map(item => {
+                const active = item.bom_no === selectedBom ? ' border-blue-400 bg-blue-50' : ' border-gray-200 hover:bg-gray-50';
+                return '<button class="mb-2 w-full border p-2 text-left' + active + '" onclick="selectBom(\'' + encodeURIComponent(item.bom_no) + '\')">' +
+                    '<div class="flex items-center justify-between gap-2">' +
+                    '<span class="font-mono text-xs font-semibold text-gray-900">' + escapeHtml(item.bom_no) + '</span>' +
+                    '<span class="text-xs text-blue-700">售价 ' + escapeHtml(numberText(item.sale_price, 2)) + '</span>' +
+                    '</div>' +
+                    '<div class="mt-1 truncate text-xs text-gray-500" title="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</div>' +
+                    '<div class="mt-2 grid grid-cols-4 gap-1 text-xs text-gray-500">' +
+                    '<span>成本<br><b class="font-mono text-gray-800">' + escapeHtml(numberText(item.cost, 2)) + '</b></span>' +
+                    '<span>加工费<br><b class="font-mono text-gray-800">' + escapeHtml(numberText(item.process_fee, 2)) + '</b></span>' +
+                    '<span>包装费<br><b class="font-mono text-gray-800">' + escapeHtml(numberText(item.package_fee, 2)) + '</b></span>' +
+                    '<span>总重<br><b class="font-mono text-gray-800">' + escapeHtml(numberText(item.total_weight, 2)) + '</b></span>' +
+                    '</div>' +
+                '</button>';
+            }).join('');
+        }
+
+        async function selectBom(encodedBomNo) {
+            selectedBom = decodeURIComponent(encodedBomNo);
+            renderBomRows();
+            document.getElementById('emptyState').classList.add('hidden');
+            document.getElementById('detailPanel').classList.add('hidden');
+            document.getElementById('detailLoading').classList.remove('hidden');
+            document.getElementById('feeActions').classList.add('hidden');
+            const res = await fetch('/api/v1/pvc-boms/' + encodeURIComponent(selectedBom), { headers: headers() });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('detailLoading').textContent = data.detail || '加载失败';
+                return;
+            }
+            selectedDetail = data;
+            renderDetail();
+            document.getElementById('detailLoading').classList.add('hidden');
+            document.getElementById('detailPanel').classList.remove('hidden');
+            document.getElementById('feeActions').classList.remove('hidden');
+            document.getElementById('feeActions').classList.add('flex');
+        }
+
+        function renderDetail() {
+            const main = selectedDetail.main;
+            document.getElementById('detailTitle').textContent = main.bom_no;
+            document.getElementById('detailMeta').textContent = main.name;
+            setFeeSelect('process', main.process_fee || '0.50');
+            setFeeSelect('package', main.package_fee || '0.04');
+            const details = selectedDetail.details || [];
+            const body = details.map((item, idx) => '<tr>' +
+                '<td class="w-32">' + (idx === 0 ? escapeHtml(main.bom_no) : '') + '</td>' +
+                '<td class="w-72">' + (idx === 0 ? escapeHtml(main.name) : '') + '</td>' +
+                '<td class="w-28 font-mono">' + escapeHtml(item.material_no) + '</td>' +
+                '<td class="min-w-72">' + escapeHtml(item.material_name) + '</td>' +
+                '<td class="w-20 text-center">' + escapeHtml(item.unit) + '</td>' +
+                '<td class="w-24 text-right font-mono">' + escapeHtml(compactNumber(item.quantity)) + '</td>' +
+                '<td class="price-cell w-24 text-right font-mono">' + escapeHtml(numberText(item.unit_price, 2)) + '</td>' +
+                '<td class="price-cell w-24 text-right font-mono">' + escapeHtml(numberText(item.amount, 2)) + '</td>' +
+            '</tr>').join('');
+            document.getElementById('detailPanel').innerHTML =
+                '<table class="bom-table w-full min-w-[980px] border-collapse text-xs">' +
+                '<thead><tr><th>母件代号</th><th>母件名称</th><th>材料代号</th><th>材料名称</th><th>材料单位</th><th>标准用量</th><th class="price-head">单价</th><th class="price-head">金额</th></tr></thead>' +
+                '<tbody>' + body +
+                '<tr><td></td><td></td><td></td><td></td><td class="text-right">合计</td><td class="text-right font-mono">' + escapeHtml(numberText(main.total_weight, 2)) + '</td><td></td><td class="text-right font-mono">' + escapeHtml(numberText(main.total_amount, 2)) + '</td></tr>' +
+                '<tr><td colspan="5"></td><td></td><td class="text-right">成本</td><td class="text-right font-mono">' + escapeHtml(numberText(main.cost, 2)) + '</td></tr>' +
+                '<tr><td colspan="5"></td><td></td><td class="fee-label text-right">加工费</td><td class="fee-label text-right font-mono">' + escapeHtml(numberText(main.process_fee, 2)) + '</td></tr>' +
+                '<tr><td colspan="5"></td><td></td><td class="text-right">包装费</td><td class="text-right font-mono">' + escapeHtml(numberText(main.package_fee, 2)) + '</td></tr>' +
+                '<tr><td colspan="5"></td><td></td><td class="text-right">售价</td><td class="text-right font-mono">' + escapeHtml(numberText(main.sale_price, 2)) + '</td></tr>' +
+                '</tbody></table>';
+        }
+
+        function setFeeSelect(type, value) {
+            const select = document.getElementById(type + 'Fee');
+            const custom = document.getElementById(type + 'Custom');
+            const normalized = Number(value).toFixed(2);
+            const found = Array.from(select.options).some(option => option.value === normalized);
+            select.value = found ? normalized : 'custom';
+            custom.value = normalized;
+            custom.classList.toggle('hidden', select.value !== 'custom');
+        }
+
+        function toggleCustomFee(type) {
+            const select = document.getElementById(type + 'Fee');
+            document.getElementById(type + 'Custom').classList.toggle('hidden', select.value !== 'custom');
+        }
+
+        function readFee(type) {
+            const select = document.getElementById(type + 'Fee');
+            return select.value === 'custom' ? document.getElementById(type + 'Custom').value : select.value;
+        }
+
+        async function saveFees() {
+            if (!selectedBom) return;
+            document.getElementById('saveStatus').textContent = '保存中...';
+            const res = await fetch('/api/v1/pvc-boms/' + encodeURIComponent(selectedBom) + '/fees', {
+                method: 'PATCH',
+                headers: headers(true),
+                body: JSON.stringify({ process_fee: readFee('process'), package_fee: readFee('package') }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('saveStatus').textContent = '';
+                return alert(data.detail || '保存失败');
+            }
+            selectedDetail.main = data.main;
+            const idx = boms.findIndex(item => item.bom_no === selectedBom);
+            if (idx >= 0) boms[idx] = data.main;
+            renderBomRows();
+            renderDetail();
+            document.getElementById('saveStatus').textContent = '已保存';
+        }
+
+        loadBoms();
+    </script>
+</body>
+</html>
