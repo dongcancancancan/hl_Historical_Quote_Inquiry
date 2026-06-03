@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import UserContext, get_current_user
 from app.database import get_db
-from app.services.pvc_bom_service import get_pvc_bom_detail, list_pvc_boms, update_pvc_bom_fees
+from app.services.pvc_bom_service import calculate_pvc_bom, get_pvc_bom_detail, list_pvc_boms, update_pvc_bom_fees
 
 
 router = APIRouter()
@@ -57,3 +57,16 @@ def save_bom_fees(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
 
+
+@router.post("/{bom_no}/calculate")
+def calculate_bom(
+    bom_no: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    _require_reviewer(user)
+    try:
+        return calculate_pvc_bom(db, bom_no, user.display_name)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))

@@ -20,6 +20,10 @@ from app.services.excel_preview_service import (
     set_review_status,
     update_quotation_fields,
 )
+from app.services.calc_param_service import get_or_create_calc_params, serialize_calc_params, update_calc_params
+from app.services.conductor_calc_service import calculate_conductor_materials, list_conductor_traces
+from app.services.glue_calc_service import calculate_glue_materials, list_glue_traces
+from app.services.price_summary_calc_service import calculate_price_summary, list_price_summary_traces
 from app.services.excel_service import render_quotation_excel
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,12 @@ class QuotationUpdateRequest(BaseModel):
 
 class QuotationReviewStatusRequest(BaseModel):
     status: str
+
+
+class QuotationCalcParamRequest(BaseModel):
+    copper_price: str | None = None
+    copper_rod_process_fee: str = "1055"
+    vat_rate: str = "1.13"
 
 
 @router.post("/upload_excel")
@@ -172,6 +182,137 @@ def preview_quotation(
     except Exception as exc:
         logger.exception("Excel preview failed for %s", code)
         raise HTTPException(status_code=500, detail=f"Excel 预览生成失败: {exc}")
+
+
+@router.get("/quotation/calc-params")
+def get_quotation_calc_params(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以维护计算参数")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    params = get_or_create_calc_params(db, quotation, user.display_name)
+    return serialize_calc_params(params)
+
+
+@router.patch("/quotation/calc-params")
+def save_quotation_calc_params(
+    code: str,
+    req: QuotationCalcParamRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以维护计算参数")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限维护")
+    try:
+        params = update_calc_params(db, quotation, req.model_dump(), user.display_name)
+        return serialize_calc_params(params)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/quotation/calculate/conductor")
+def calculate_quotation_conductor(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行导体计算")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限计算")
+    try:
+        return calculate_conductor_materials(db, quotation, user.display_name)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/calculate/conductor/traces")
+def get_quotation_conductor_traces(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看导体计算过程")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    return {"items": list_conductor_traces(db, quotation)}
+
+
+@router.post("/quotation/calculate/glue")
+def calculate_quotation_glue(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行胶料计算")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限计算")
+    try:
+        return calculate_glue_materials(db, quotation, user.display_name)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/calculate/glue/traces")
+def get_quotation_glue_traces(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看胶料计算过程")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    return {"items": list_glue_traces(db, quotation)}
+
+
+@router.post("/quotation/calculate/price-summary")
+def calculate_quotation_price_summary(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行售价汇总计算")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限计算")
+    try:
+        return calculate_price_summary(db, quotation, user.display_name)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/calculate/price-summary/traces")
+def get_quotation_price_summary_traces(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看售价汇总计算过程")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    return {"items": list_price_summary_traces(db, quotation)}
 
 
 @router.patch("/quotation")

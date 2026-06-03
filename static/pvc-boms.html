@@ -58,6 +58,7 @@
                     </label>
                     <input id="packageCustom" type="number" min="0" step="0.0001" class="hidden w-20 border px-2 py-1 text-xs">
                     <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveFees()">保存费用</button>
+                    <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateBom()">计算并更新</button>
                     <span id="saveStatus" class="text-xs text-gray-400"></span>
                 </div>
             </div>
@@ -168,7 +169,7 @@
             '</tr>').join('');
             document.getElementById('detailPanel').innerHTML =
                 '<table class="bom-table w-full min-w-[980px] border-collapse text-xs">' +
-                '<thead><tr><th>母件代号</th><th>母件名称</th><th>材料代号</th><th>材料名称</th><th>材料单位</th><th>标准用量</th><th class="price-head">单价</th><th class="price-head">金额</th></tr></thead>' +
+                '<thead><tr><th>母件代号</th><th>母件名称</th><th>材料代号</th><th>材料名称</th><th>材料单位</th><th>BOM用量</th><th class="price-head">单价</th><th class="price-head">金额</th></tr></thead>' +
                 '<tbody>' + body +
                 '<tr><td></td><td></td><td></td><td></td><td class="text-right">合计</td><td class="text-right font-mono">' + escapeHtml(numberText(main.total_weight, 2)) + '</td><td></td><td class="text-right font-mono">' + escapeHtml(numberText(main.total_amount, 2)) + '</td></tr>' +
                 '<tr><td colspan="5"></td><td></td><td class="text-right">成本</td><td class="text-right font-mono">' + escapeHtml(numberText(main.cost, 2)) + '</td></tr>' +
@@ -217,6 +218,27 @@
             renderBomRows();
             renderDetail();
             document.getElementById('saveStatus').textContent = '已保存';
+        }
+
+        async function calculateBom() {
+            if (!selectedBom) return;
+            if (!confirm('确认根据当前 PVC 材料价格重新计算并更新数据库吗？')) return;
+            document.getElementById('saveStatus').textContent = '计算中...';
+            const res = await fetch('/api/v1/pvc-boms/' + encodeURIComponent(selectedBom) + '/calculate', {
+                method: 'POST',
+                headers: headers(),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('saveStatus').textContent = '';
+                return alert(data.detail || '计算失败');
+            }
+            selectedDetail = data;
+            const idx = boms.findIndex(item => item.bom_no === selectedBom);
+            if (idx >= 0) boms[idx] = data.main;
+            renderBomRows();
+            renderDetail();
+            document.getElementById('saveStatus').textContent = '已计算并更新';
         }
 
         loadBoms();

@@ -49,6 +49,27 @@
                     <button id="quoteBtn" class="text-sm text-orange-600 hover:text-orange-800" onclick="markQuoted()">标记已报价</button>
                 </div>
             </div>
+            <div id="calcParamsPanel" class="hidden border-b bg-slate-50 px-4 py-2">
+                <div class="flex flex-wrap items-end gap-3">
+                    <label class="text-xs text-gray-600">铜价（元/吨）
+                        <input id="calcCopperPrice" type="number" min="0" step="0.01" class="mt-1 w-32 border px-2 py-1 text-xs">
+                    </label>
+                    <label class="text-xs text-gray-600">铜杆加工费
+                        <input id="calcCopperRodFee" type="number" min="0" step="0.01" class="mt-1 w-28 border px-2 py-1 text-xs" value="1055">
+                    </label>
+                    <label class="text-xs text-gray-600">增值税率
+                        <input id="calcVatRate" type="number" min="0" step="0.0001" class="mt-1 w-24 border px-2 py-1 text-xs" value="1.13">
+                    </label>
+                    <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveCalcParams()">保存参数</button>
+                    <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体</button>
+                    <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看过程</button>
+                    <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料</button>
+                    <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料过程</button>
+                    <button class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">计算售价</button>
+                    <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showPriceSummaryTraces()">查看售价过程</button>
+                    <span id="calcParamStatus" class="text-xs text-gray-400"></span>
+                </div>
+            </div>
             <div id="emptyState" class="flex flex-1 items-center justify-center text-sm text-gray-400">从左右列表中选择一条报价单</div>
             <div id="sheetLoading" class="hidden flex flex-1 items-center justify-center text-sm text-gray-400">正在加载数据库内容...</div>
             <iframe id="sheetFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="成本分析表"></iframe>
@@ -65,6 +86,16 @@
             <div id="quotedList" class="flex-1 overflow-y-auto p-2"></div>
         </aside>
     </main>
+
+    <div id="traceModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+        <div class="max-h-[82vh] w-full max-w-5xl overflow-auto border bg-white p-5 shadow-xl">
+            <div class="mb-3 flex items-center justify-between">
+                <h2 class="text-sm font-semibold">导体计算过程</h2>
+                <button class="text-xl text-gray-500" onclick="closeTraceModal()">×</button>
+            </div>
+            <div id="traceRows" class="space-y-3 text-xs"></div>
+        </div>
+    </div>
 
     <script>
         const token = sessionStorage.getItem('token');
@@ -146,8 +177,10 @@
             document.getElementById('sheetStatus').textContent = status === 'quoted' ? '已报价 · 只读' : '待报价 · 可编辑';
             document.getElementById('sheetActions').classList.remove('hidden');
             document.getElementById('sheetActions').classList.add('flex');
+            document.getElementById('calcParamsPanel').classList.remove('hidden');
             document.getElementById('editBtn').classList.toggle('hidden', status === 'quoted');
             document.getElementById('quoteBtn').classList.toggle('hidden', status === 'quoted');
+            loadCalcParams();
             try {
                 const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(selectedCode), {
                     headers: { 'Authorization': 'Bearer ' + token }
@@ -159,6 +192,156 @@
             } catch (err) {
                 document.getElementById('sheetLoading').textContent = '加载失败：' + err.message;
             }
+        }
+
+        async function loadCalcParams() {
+            if (!selectedCode) return;
+            document.getElementById('calcParamStatus').textContent = '参数加载中...';
+            const res = await fetch('/api/v1/etl/quotation/calc-params?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('calcParamStatus').textContent = data.detail || '参数加载失败';
+                return;
+            }
+            document.getElementById('calcCopperPrice').value = data.copper_price || '';
+            document.getElementById('calcCopperRodFee').value = data.copper_rod_process_fee || '1055';
+            document.getElementById('calcVatRate').value = data.vat_rate || '1.13';
+            document.getElementById('calcParamStatus').textContent = data.update_time ? '参数已加载' : '使用默认参数';
+        }
+
+        async function saveCalcParams() {
+            if (!selectedCode) return;
+            const body = {
+                copper_price: document.getElementById('calcCopperPrice').value || null,
+                copper_rod_process_fee: document.getElementById('calcCopperRodFee').value || '1055',
+                vat_rate: document.getElementById('calcVatRate').value || '1.13',
+            };
+            document.getElementById('calcParamStatus').textContent = '保存中...';
+            const res = await fetch('/api/v1/etl/quotation/calc-params?code=' + encodeURIComponent(selectedCode), {
+                method: 'PATCH',
+                headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('calcParamStatus').textContent = '';
+                return alert('计算参数保存失败：' + (data.detail || '未知错误'));
+            }
+            document.getElementById('calcCopperPrice').value = data.copper_price || '';
+            document.getElementById('calcCopperRodFee').value = data.copper_rod_process_fee || '1055';
+            document.getElementById('calcVatRate').value = data.vat_rate || '1.13';
+            document.getElementById('calcParamStatus').textContent = '参数已保存';
+        }
+
+        async function calculateConductor() {
+            if (!selectedCode) return;
+            if (!confirm('确认根据铜价和铜加工费重新计算导体单价、材料金额吗？')) return;
+            document.getElementById('calcParamStatus').textContent = '导体计算中...';
+            const res = await fetch('/api/v1/etl/quotation/calculate/conductor?code=' + encodeURIComponent(selectedCode), {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('calcParamStatus').textContent = '';
+                return alert('导体计算失败：' + (data.detail || '未知错误'));
+            }
+            document.getElementById('calcParamStatus').textContent = '已计算材料 ' + data.calculated + ' 行，制程费用 ' + (data.process_calculated || 0) + ' 行';
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+        }
+
+        async function showConductorTraces() {
+            if (!selectedCode) return;
+            const res = await fetch('/api/v1/etl/quotation/calculate/conductor/traces?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) return alert('计算过程加载失败：' + (data.detail || '未知错误'));
+            const rows = data.items || [];
+            document.getElementById('traceRows').innerHTML = rows.length ? rows.map(item =>
+                '<div class="border p-3">' +
+                '<div class="mb-1 font-semibold">' + escapeHtml(item.field_name) + ' = ' + escapeHtml(item.result_value) + '</div>' +
+                '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
+                '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
+                '</div>'
+            ).join('') : '<div class="py-6 text-center text-gray-400">暂无导体计算过程</div>';
+            document.getElementById('traceModal').classList.replace('hidden', 'flex');
+        }
+
+        async function calculateGlue() {
+            if (!selectedCode) return;
+            if (!confirm('确认根据 PVC 母料 BOM 售价重新计算 C 开头胶料单价、材料金额吗？')) return;
+            document.getElementById('calcParamStatus').textContent = '胶料计算中...';
+            const res = await fetch('/api/v1/etl/quotation/calculate/glue?code=' + encodeURIComponent(selectedCode), {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('calcParamStatus').textContent = '';
+                return alert('胶料计算失败：' + (data.detail || '未知错误'));
+            }
+            document.getElementById('calcParamStatus').textContent = '已计算胶料 ' + data.calculated + ' 行';
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+        }
+
+        async function showGlueTraces() {
+            if (!selectedCode) return;
+            const res = await fetch('/api/v1/etl/quotation/calculate/glue/traces?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) return alert('胶料计算过程加载失败：' + (data.detail || '未知错误'));
+            const rows = data.items || [];
+            document.getElementById('traceRows').innerHTML = rows.length ? rows.map(item =>
+                '<div class="border p-3">' +
+                '<div class="mb-1 font-semibold">' + escapeHtml(item.field_name) + ' = ' + escapeHtml(item.result_value) + '</div>' +
+                '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
+                '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
+                '</div>'
+            ).join('') : '<div class="py-6 text-center text-gray-400">暂无胶料计算过程</div>';
+            document.getElementById('traceModal').classList.replace('hidden', 'flex');
+        }
+
+        async function calculatePriceSummary() {
+            if (!selectedCode) return;
+            if (!confirm('确认根据当前材料成本、费用和税率重新计算成本、取利售价、不取利售价、最终售价吗？')) return;
+            document.getElementById('calcParamStatus').textContent = '售价计算中...';
+            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary?code=' + encodeURIComponent(selectedCode), {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                document.getElementById('calcParamStatus').textContent = '';
+                return alert('售价计算失败：' + (data.detail || '未知错误'));
+            }
+            document.getElementById('calcParamStatus').textContent = '售价已计算';
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+        }
+
+        async function showPriceSummaryTraces() {
+            if (!selectedCode) return;
+            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary/traces?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            const data = await res.json();
+            if (!res.ok) return alert('售价计算过程加载失败：' + (data.detail || '未知错误'));
+            const rows = data.items || [];
+            document.getElementById('traceRows').innerHTML = rows.length ? rows.map(item =>
+                '<div class="border p-3">' +
+                '<div class="mb-1 font-semibold">' + escapeHtml(item.field_name) + ' = ' + escapeHtml(item.result_value) + '</div>' +
+                '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
+                '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
+                '</div>'
+            ).join('') : '<div class="py-6 text-center text-gray-400">暂无售价计算过程</div>';
+            document.getElementById('traceModal').classList.replace('hidden', 'flex');
+        }
+
+        function closeTraceModal() {
+            document.getElementById('traceModal').classList.replace('flex', 'hidden');
         }
 
         function resetToolbar() {

@@ -316,7 +316,7 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
                 _edit_cell(quotation.material_cost, "main", quotation.id, "material_cost", css="number summary"),
                 _cell("RMB/M", colspan=3, css="unit"),
                 _edit_cell(unit_usage_sum, "main", quotation.id, "unit_usage_sum", css="number summary"),
-                _cell("Kg", css="unit"),
+                _cell("KG/M", css="unit"),
                 _edit_cell(quotation.material_amount_sum, "main", quotation.id, "material_amount_sum", css="number summary"),
             ),
             _row(

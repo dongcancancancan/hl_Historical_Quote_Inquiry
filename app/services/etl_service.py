@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from fastapi import UploadFile
 from openai import AsyncOpenAI
 
+from app.models.calc_param import QuotationCalcParam
+from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.core.config import settings
 
@@ -144,6 +146,139 @@ def _safe_numeric(val, scale: int = 4) -> float:
         return round(float(val), scale)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _parse_excel_numeric(val):
+    """Parse raw Excel numeric values, including text percentages like ``17%``."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).strip()
+    if not text:
+        return None
+    text = text.replace(",", "").replace("，", "")
+    try:
+        if text.endswith("%"):
+            return float(text[:-1].strip()) / 100
+        return float(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def _compact_cell_text(val) -> str:
+    if val is None:
+        return ""
+    return re.sub(r"\s+", "", str(val)).strip()
+
+
+def _patch_cost_summary_from_excel(data: dict, file_path: str, block: QuotationBlock | None) -> dict:
+    """Use fixed Excel layout to correct bottom fee fields after LLM extraction.
+
+    The template has two visible "other fee" labels: a large merged area label and
+    the actual field header. Matching the header row shape keeps the stored value
+    aligned with the real editable field.
+    """
+    if not data or not file_path or not block:
+        return data
+
+    ext = os.path.splitext(file_path)[1].lower()
+    is_xls = ext == ".xls"
+    wb = None
+    try:
+        if is_xls:
+            import xlrd
+            wb = xlrd.open_workbook(file_path)
+            ws = wb.sheet_by_name(block.sheet_name)
+            max_row = ws.nrows
+            max_col = ws.ncols
+
+            def cell_value(row: int, col: int):
+                if row < 1 or col < 1 or row > max_row or col > max_col:
+                    return None
+                return ws.cell_value(row - 1, col - 1)
+        else:
+            wb = load_workbook(file_path, data_only=True)
+            ws = wb[block.sheet_name]
+            max_row = ws.max_row
+            max_col = ws.max_column
+
+            def cell_value(row: int, col: int):
+                if row < 1 or col < 1 or row > max_row or col > max_col:
+                    return None
+                return ws.cell(row=row, column=col).value
+
+        cost_summary = data.setdefault("cost_summary", {})
+
+        header_groups = [
+            {
+                "anchors": ("UL标签费", "运输费", "包装费"),
+                "fields": {
+                    "ul_label_fee": "UL标签费",
+                    "transport_fee": "运输费",
+                    "package_fee": "包装费",
+                    "scrap_rate": "废品损耗",
+                    "startup_times": "订单开机次数",
+                    "total_process_cost": "费用总计",
+                },
+            },
+            {
+                "anchors": ("其他费用", "净利率", "报关费", "订单米数"),
+                "fields": {
+                    "other_fee": "其他费用",
+                    "net_profit_rate": "净利率",
+                    "customs_fee": "报关费",
+                    "vat_rate": "增值税率",
+                    "order_meters": "订单米数",
+                },
+            },
+            {
+                "anchors": ("照射芯数", "照射费用", "营业费用率"),
+                "fields": {
+                    "irradiation_core_count": "照射芯数",
+                    "irradiation_core_fee": "照射费用",
+                    "business_fee_rate": "营业费用率",
+                    "monthly_interest_rate": "月结利息",
+                    "corp_tax_rate": "企税税率",
+                },
+            },
+        ]
+
+        patched: dict[str, float] = {}
+        start_row = max(1, block.row_idx)
+        end_row = min(max_row, block.row_idx + 80)
+        for row in range(start_row, end_row + 1):
+            cells = [_compact_cell_text(cell_value(row, col)) for col in range(1, max_col + 1)]
+            row_text = "|".join(cells)
+            for group in header_groups:
+                if not all(anchor in row_text for anchor in group["anchors"]):
+                    continue
+                for key, header in group["fields"].items():
+                    for idx, cell_text in enumerate(cells, start=1):
+                        if header in cell_text:
+                            parsed = _parse_excel_numeric(cell_value(row + 1, idx))
+                            if parsed is not None:
+                                cost_summary[key] = parsed
+                                patched[key] = parsed
+                            break
+
+        if patched:
+            logger.info(
+                "[%s] Excel structure patched cost_summary fields: %s",
+                data.get("quotation_no") or block.preview[:50],
+                ", ".join(sorted(patched.keys())),
+            )
+    except Exception as e:
+        logger.warning(
+            "[%s] Excel structure patch skipped: %s",
+            data.get("quotation_no") if data else block.preview[:50],
+            e,
+        )
+    finally:
+        if wb is not None and not is_xls:
+            wb.close()
+
+    return data
 
 
 def _row_values_xlsx(ws, row_idx: int) -> list[str]:
@@ -487,6 +622,7 @@ async def process_excel_streaming(
             logger.info(f"[{code}] LLM 完成, 耗时 {t_llm:.1f}s")
             return {
                 "index": index,
+                "block": block,
                 "data": data,
                 "error": None,
                 "quotation_code": code,
@@ -500,6 +636,7 @@ async def process_excel_streaming(
             logger.error(f"[Block {index}] LLM 失败 ({t_llm:.1f}s): {e}")
             return {
                 "index": index,
+                "block": block,
                 "data": None,
                 "error": str(e),
                 "quotation_code": block.preview[:50],
@@ -567,7 +704,8 @@ async def process_excel_streaming(
             if r["data"] is None or r.get("dup_skipped"):
                 continue
             try:
-                code = _write_one_quotation(db, r["data"], tenant_id, username, saved_path, display_name)
+                data = _patch_cost_summary_from_excel(r["data"], saved_path, r.get("block"))
+                code = _write_one_quotation(db, data, tenant_id, username, saved_path, display_name)
                 if code:
                     db_success += 1
                     logger.info(f"[{code}] DB 写入完成")
@@ -684,6 +822,12 @@ def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_n
     from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
     if get_review_status(q) == REVIEW_QUOTED:
         return False
+    db.query(QuotationCalculationTrace).filter(
+        QuotationCalculationTrace.quotation_main_id == q.id,
+    ).delete(synchronize_session=False)
+    db.query(QuotationCalcParam).filter(
+        QuotationCalcParam.quotation_main_id == q.id,
+    ).delete(synchronize_session=False)
     db.delete(q)
     db.commit()
     logger.info(f"[{quotation_code}] 已由 {creator_name} 删除 (admin={is_admin})")
@@ -722,6 +866,7 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
             seen_codes.add(code)
 
             t1 = time.time()
+            data = _patch_cost_summary_from_excel(data, saved_path, block)
             quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path)
             t_db = time.time() - t1
 
