@@ -5,12 +5,13 @@ import time
 import shutil
 import logging
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.auth import UserContext, get_current_user
+from app.models.quotation import QuotationMain
 from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
 from app.services.excel_preview_service import (
     get_accessible_quotation,
@@ -22,6 +23,7 @@ from app.services.excel_preview_service import (
 )
 from app.services.calc_param_service import get_or_create_calc_params, serialize_calc_params, update_calc_params
 from app.services.conductor_calc_service import calculate_conductor_materials, list_conductor_traces
+from app.services.copper_scenario_service import calculate_bpm_copper_scenarios
 from app.services.glue_calc_service import calculate_glue_materials, list_glue_traces
 from app.services.price_summary_calc_service import calculate_price_summary, list_price_summary_traces
 from app.services.excel_service import render_quotation_excel
@@ -55,9 +57,23 @@ class QuotationCalcParamRequest(BaseModel):
     vat_rate: str = "1.13"
 
 
+class BatchCalcParamRequest(QuotationCalcParamRequest):
+    quotation_codes: list[str]
+    calculate_after_save: bool = False
+
+
+class BatchDeleteRequest(BaseModel):
+    quotation_codes: list[str]
+
+
+class CopperScenarioRequest(BaseModel):
+    bpm_no: str
+
+
 @router.post("/upload_excel")
 async def upload_and_process_excel(
     file: UploadFile = File(...),
+    bpm_no: str = Form(...),
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
     request: Request = None,
@@ -67,6 +83,9 @@ async def upload_and_process_excel(
         raise HTTPException(status_code=403, detail="审价科账号不允许上传成本分析表")
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .xls 格式的文件")
+    bpm_no = (bpm_no or "").strip().upper()
+    if not bpm_no:
+        raise HTTPException(status_code=400, detail="请填写 BPM 流程号")
 
     # 保存文件（逐块读取以控制大小）
     file_ext = os.path.splitext(file.filename)[1]
@@ -112,6 +131,7 @@ async def upload_and_process_excel(
             tenant_id=user.tenant_id,
             username=user.username,
             display_name=user.display_name,
+            bpm_no=bpm_no,
         )
         try:
             async for event in gen:
@@ -152,6 +172,37 @@ def review_history(
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看")
     return get_review_history(db)
+
+
+@router.get("/quotations")
+def list_quotations(
+    bpm_no: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer and not user.is_admin:
+        raise HTTPException(status_code=403, detail="无权查看批量报价列表")
+    query = db.query(QuotationMain).filter(QuotationMain.deleted == False)
+    if bpm_no:
+        query = query.filter(QuotationMain.bpm_no == bpm_no.strip().upper())
+    rows = query.order_by(QuotationMain.create_time.desc()).limit(1000).all()
+    items = []
+    for quotation in rows:
+        review_status = get_review_status(quotation)
+        if status and review_status != status:
+            continue
+        items.append({
+            "quotation_code": quotation.quotation_code or "",
+            "bpm_no": quotation.bpm_no or "",
+            "customer_name": quotation.customer_name or "",
+            "product_spec": quotation.product_spec or "",
+            "upload_user": quotation.creator or "",
+            "create_time": quotation.create_time.isoformat() if quotation.create_time else None,
+            "review_status": review_status,
+            "final_selling_price": str(quotation.final_selling_price or ""),
+        })
+    return {"items": items}
 
 
 @router.delete("/quotation")
@@ -216,6 +267,82 @@ def save_quotation_calc_params(
         return serialize_calc_params(params)
     except ValueError as exc:
         db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/quotation/calc-params/batch")
+def save_batch_calc_params(
+    req: BatchCalcParamRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以批量维护计算参数")
+    codes = [code.strip() for code in req.quotation_codes if code and code.strip()]
+    if not codes:
+        raise HTTPException(status_code=400, detail="请选择成本分析号")
+    updated = 0
+    calculated = 0
+    skipped = []
+    for code in codes:
+        quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+        if not quotation:
+            skipped.append({"quotation_code": code, "reason": "未找到或无权限"})
+            continue
+        try:
+            update_calc_params(db, quotation, req.model_dump(), user.display_name)
+            updated += 1
+            if req.calculate_after_save:
+                calculate_conductor_materials(db, quotation, user.display_name)
+                calculate_price_summary(db, quotation, user.display_name)
+                calculated += 1
+        except ValueError as exc:
+            db.rollback()
+            skipped.append({"quotation_code": code, "reason": str(exc)})
+        except Exception as exc:
+            db.rollback()
+            logger.exception("Batch calc params failed for %s", code)
+            skipped.append({"quotation_code": code, "reason": str(exc)})
+    return {"updated": updated, "calculated": calculated, "skipped": skipped}
+
+
+@router.delete("/quotations/batch")
+def remove_quotations_batch(
+    req: BatchDeleteRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer and not user.is_admin:
+        raise HTTPException(status_code=403, detail="无权批量删除")
+    codes = [code.strip() for code in req.quotation_codes if code and code.strip()]
+    if not codes:
+        raise HTTPException(status_code=400, detail="请选择成本分析号")
+    deleted = 0
+    skipped = []
+    for code in codes:
+        try:
+            ok = delete_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+            if ok:
+                deleted += 1
+            else:
+                skipped.append({"quotation_code": code, "reason": "未找到、已报价或无权限"})
+        except Exception as exc:
+            db.rollback()
+            skipped.append({"quotation_code": code, "reason": str(exc)})
+    return {"deleted": deleted, "skipped": skipped}
+
+
+@router.post("/quotation/copper-scenarios")
+def calculate_copper_scenarios(
+    req: CopperScenarioRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行铜段测算")
+    try:
+        return calculate_bpm_copper_scenarios(db, req.bpm_no)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 

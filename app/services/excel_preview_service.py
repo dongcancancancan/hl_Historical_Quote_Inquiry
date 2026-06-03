@@ -120,6 +120,7 @@ def get_review_history(db: Session, limit: int = 1000) -> dict[str, list[dict]]:
         status = get_review_status(quotation)
         history[status].append({
             "quotation_code": quotation.quotation_code,
+            "bpm_no": quotation.bpm_no or "",
             "customer_name": quotation.customer_name or "",
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",

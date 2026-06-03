@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>审价科批量操作</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 text-gray-800">
+    <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
+        <div>
+            <h1 class="text-base font-semibold">审价科批量操作</h1>
+            <p class="text-xs text-gray-400">按 BPM 流程号批量设置铜价、计算和删除</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="/static/review.html" class="text-sm text-blue-600 hover:text-blue-800">返回工作台</a>
+            <a href="/static/copper-scenarios.html" class="text-sm text-blue-600 hover:text-blue-800">铜价区间测算</a>
+            <button class="text-xs text-gray-400 hover:text-red-500" onclick="logout()">退出</button>
+        </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl p-4">
+        <section class="border bg-white p-4 shadow-sm">
+            <div class="flex flex-wrap items-end gap-3">
+                <label class="text-sm text-gray-600">BPM流程号
+                    <input id="bpmNo" class="mt-1 w-56 border px-3 py-2 text-sm font-mono uppercase" placeholder="EG-B015-26050127">
+                </label>
+                <button class="border bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700" onclick="loadQuotations()">查询</button>
+                <span id="statusText" class="text-sm text-gray-400"></span>
+            </div>
+        </section>
+
+        <section class="mt-4 grid gap-4 lg:grid-cols-[1fr_340px]">
+            <div class="border bg-white shadow-sm">
+                <div class="flex items-center justify-between border-b px-4 py-3">
+                    <div class="text-sm font-semibold">成本分析表</div>
+                    <label class="text-xs text-gray-500"><input id="selectAll" type="checkbox" onchange="toggleAll()"> 全选</label>
+                </div>
+                <div class="max-h-[calc(100vh-220px)] overflow-auto">
+                    <table class="min-w-full border-collapse text-sm">
+                        <thead class="sticky top-0 bg-gray-50 text-xs text-gray-500">
+                            <tr>
+                                <th class="border-b px-3 py-2 text-left">选择</th>
+                                <th class="border-b px-3 py-2 text-left">成本分析号</th>
+                                <th class="border-b px-3 py-2 text-left">BPM</th>
+                                <th class="border-b px-3 py-2 text-left">状态</th>
+                                <th class="border-b px-3 py-2 text-left">上传时间</th>
+                                <th class="border-b px-3 py-2 text-left">品名规格</th>
+                            </tr>
+                        </thead>
+                        <tbody id="quotationRows"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <aside class="border bg-white p-4 shadow-sm">
+                <h2 class="text-sm font-semibold">批量设置铜价</h2>
+                <div class="mt-3 space-y-3">
+                    <label class="block text-xs text-gray-600">铜价（元/吨）
+                        <input id="copperPrice" type="number" min="0" step="0.01" class="mt-1 w-full border px-3 py-2 text-sm">
+                    </label>
+                    <label class="block text-xs text-gray-600">铜杆加工费
+                        <input id="rodFee" type="number" min="0" step="0.01" value="1055" class="mt-1 w-full border px-3 py-2 text-sm">
+                    </label>
+                    <label class="block text-xs text-gray-600">增值税率
+                        <input id="vatRate" type="number" min="0" step="0.0001" value="1.13" class="mt-1 w-full border px-3 py-2 text-sm">
+                    </label>
+                    <label class="flex items-center gap-2 text-sm text-gray-600">
+                        <input id="calculateAfterSave" type="checkbox">
+                        设置后立即完整计算导体和售价
+                    </label>
+                    <button class="w-full border bg-green-600 px-4 py-2 text-sm text-white hover:bg-green-700" onclick="batchSetCopper()">批量设置</button>
+                    <button class="w-full border border-red-200 px-4 py-2 text-sm text-red-600 hover:bg-red-50" onclick="batchDelete()">批量删除</button>
+                </div>
+            </aside>
+        </section>
+    </main>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        if (!token) window.location.href = '/static/login.html';
+        if (sessionStorage.getItem('role') !== 'reviewer') window.location.href = '/static/index.html';
+        let items = [];
+
+        function logout() { sessionStorage.clear(); window.location.href = '/static/login.html'; }
+        function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str || ''; return div.innerHTML; }
+        function headers(json = false) {
+            const h = { 'Authorization': 'Bearer ' + token };
+            if (json) h['Content-Type'] = 'application/json';
+            return h;
+        }
+        function selectedCodes() {
+            return Array.from(document.querySelectorAll('.row-check:checked')).map(input => input.value);
+        }
+        function toggleAll() {
+            document.querySelectorAll('.row-check').forEach(input => input.checked = document.getElementById('selectAll').checked);
+        }
+        async function loadQuotations() {
+            const bpmNo = (document.getElementById('bpmNo').value || '').trim().toUpperCase();
+            if (!bpmNo) return alert('请填写 BPM流程号');
+            document.getElementById('statusText').textContent = '查询中...';
+            const res = await fetch('/api/v1/etl/quotations?bpm_no=' + encodeURIComponent(bpmNo), { headers: headers() });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '查询失败');
+            items = data.items || [];
+            document.getElementById('statusText').textContent = '共 ' + items.length + ' 条';
+            renderRows();
+        }
+        function renderRows() {
+            document.getElementById('selectAll').checked = false;
+            document.getElementById('quotationRows').innerHTML = items.length ? items.map(item =>
+                '<tr class="hover:bg-gray-50">' +
+                '<td class="border-b px-3 py-2"><input class="row-check" type="checkbox" value="' + escapeHtml(item.quotation_code) + '"' + (item.review_status === 'quoted' ? ' disabled' : '') + '></td>' +
+                '<td class="border-b px-3 py-2 font-mono text-xs">' + escapeHtml(item.quotation_code) + '</td>' +
+                '<td class="border-b px-3 py-2 font-mono text-xs text-blue-600">' + escapeHtml(item.bpm_no) + '</td>' +
+                '<td class="border-b px-3 py-2 text-xs">' + (item.review_status === 'quoted' ? '已报价' : '待报价') + '</td>' +
+                '<td class="border-b px-3 py-2 font-mono text-xs">' + escapeHtml((item.create_time || '').replace('T', ' ').substring(0, 19)) + '</td>' +
+                '<td class="border-b px-3 py-2 text-xs">' + escapeHtml(item.product_spec) + '</td>' +
+                '</tr>'
+            ).join('') : '<tr><td colspan="6" class="px-3 py-8 text-center text-sm text-gray-400">暂无数据</td></tr>';
+        }
+        async function batchSetCopper() {
+            const codes = selectedCodes();
+            if (!codes.length) return alert('请选择待报价成本分析表');
+            const body = {
+                quotation_codes: codes,
+                copper_price: document.getElementById('copperPrice').value || null,
+                copper_rod_process_fee: document.getElementById('rodFee').value || '1055',
+                vat_rate: document.getElementById('vatRate').value || '1.13',
+                calculate_after_save: document.getElementById('calculateAfterSave').checked,
+            };
+            const res = await fetch('/api/v1/etl/quotation/calc-params/batch', {
+                method: 'PATCH',
+                headers: headers(true),
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '批量设置失败');
+            alert('已更新 ' + data.updated + ' 条，完整计算 ' + data.calculated + ' 条，跳过 ' + (data.skipped || []).length + ' 条');
+            await loadQuotations();
+        }
+        async function batchDelete() {
+            const codes = selectedCodes();
+            if (!codes.length) return alert('请选择待报价成本分析表');
+            if (!confirm('确认删除选中的 ' + codes.length + ' 个成本分析表吗？已报价不能删除。')) return;
+            const res = await fetch('/api/v1/etl/quotations/batch', {
+                method: 'DELETE',
+                headers: headers(true),
+                body: JSON.stringify({ quotation_codes: codes }),
+            });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || '批量删除失败');
+            alert('已删除 ' + data.deleted + ' 条，跳过 ' + (data.skipped || []).length + ' 条');
+            await loadQuotations();
+        }
+    </script>
+</body>
+</html>

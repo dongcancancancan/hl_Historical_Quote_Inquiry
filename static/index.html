@@ -54,6 +54,11 @@
                 <h2 class="text-lg font-semibold mb-4 text-blue-600">上传成本分析表</h2>
                 <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分 Sheet 并入库。</p>
                 <form id="uploadForm" class="space-y-4">
+                    <label class="block text-sm font-medium text-gray-700">
+                        BPM流程号
+                        <input type="text" id="bpmNo" required placeholder="EG-B015-26050127"
+                            class="mt-1 w-full rounded border px-3 py-2 text-sm uppercase focus:outline-none focus:ring-1 focus:ring-blue-400">
+                    </label>
                     <input type="file" id="excelFile" accept=".xls,.xlsx" class="block w-full text-sm text-gray-500
                         file:mr-4 file:py-2 file:px-4
                         file:rounded-full file:border-0
@@ -197,7 +202,7 @@
             if (!keyword) { renderHistory(historyData); return; }
             const filtered = [];
             for (const group of historyData) {
-                const items = group.items.filter(it => it.quotation_code.toUpperCase().includes(keyword));
+                const items = group.items.filter(it => ((it.quotation_code || '') + ' ' + (it.bpm_no || '')).toUpperCase().includes(keyword));
                 if (items.length > 0) filtered.push({ date: group.date, items: items });
             }
             renderHistory(filtered);
@@ -218,6 +223,7 @@
                     return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
                         '<button class="flex-1 min-w-0 text-left" title="' + escapeHtml(tooltip) + '" onclick="previewQuotation(decodeURIComponent(\'' + encodedCode + '\'))">' +
                             '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
+                            '<span class="text-xs font-mono text-blue-500 truncate block">' + escapeHtml(it.bpm_no || '-') + '</span>' +
                             '<span class="text-xs text-gray-400 truncate block">' + escapeHtml(it.customer_name + ' ' + it.product_spec).substring(0, 24) + '</span>' +
                         '</button>' +
                         '<div class="flex items-center gap-2 shrink-0">' +
@@ -390,14 +396,18 @@
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fileInput = document.getElementById('excelFile');
+            const bpmNoInput = document.getElementById('bpmNo');
             const uploadBtn = document.getElementById('uploadBtn');
             const progressCard = document.getElementById('progressCard');
             const progressContent = document.getElementById('progressContent');
 
             if (!fileInput.files.length) { alert('请选择文件'); return; }
+            const bpmNo = (bpmNoInput.value || '').trim().toUpperCase();
+            if (!bpmNo) { alert('请填写 BPM流程号'); bpmNoInput.focus(); return; }
 
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
+            formData.append('bpm_no', bpmNo);
 
             uploadBtn.disabled = true;
             uploadBtn.textContent = '正在处理...';
@@ -442,6 +452,7 @@
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = '上传并清洗入库';
                 fileInput.value = '';
+                bpmNoInput.value = '';
                 loadHistory(); // 上传完成后刷新历史
             }
         });

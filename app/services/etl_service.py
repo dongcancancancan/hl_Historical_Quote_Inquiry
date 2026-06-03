@@ -374,23 +374,35 @@ async def _extract_one_async(block: QuotationBlock, semaphore: asyncio.Semaphore
     )
 
     def _parse_json(raw: str) -> dict:
-        """尝试解析 LLM 返回内容为 JSON，支持去除 markdown 代码块包裹"""
+        """尝试解析 LLM 返回内容为 JSON，支持去除 markdown 代码块包裹。确保始终返回 dict。"""
         if not raw or not raw.strip():
             raise ValueError("Empty or whitespace-only response")
+
+        def _load(text: str):
+            """json.loads + 容错：如果是数组则取第一个元素"""
+            obj = json.loads(text)
+            if isinstance(obj, list):
+                if len(obj) > 0 and isinstance(obj[0], dict):
+                    return obj[0]
+                raise ValueError(f"Expected JSON object, got list with {len(obj)} non-dict items")
+            if not isinstance(obj, dict):
+                raise ValueError(f"Expected JSON object, got {type(obj).__name__}")
+            return obj
+
         # 尝试直接解析
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            return _load(raw)
+        except (json.JSONDecodeError, ValueError):
             pass
         # 尝试提取 markdown 代码块中的 JSON
         m = _re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw, _re.DOTALL)
         if m:
-            return json.loads(m.group(1).strip())
+            return _load(m.group(1).strip())
         # 尝试找第一个 { 到最后一个 }
         start = raw.find('{')
         end = raw.rfind('}')
         if start != -1 and end > start:
-            return json.loads(raw[start:end + 1])
+            return _load(raw[start:end + 1])
         raise
 
     async with semaphore:
@@ -484,6 +496,7 @@ def _write_one_quotation(
     username: str,
     saved_path: str,
     display_name: str = "",
+    bpm_no: str = "",
 ) -> str:
     """将单条 LLM 提取结果写入数据库，返回 quotation_code。
     如果成本分析号已存在则跳过，返回空字符串。"""
@@ -518,6 +531,7 @@ def _write_one_quotation(
     new_main = QuotationMain(
         tenant_id=tenant_id,
         quotation_code=quotation_code,
+        bpm_no=bpm_no,
         customer_name=data.get("customer") or "",
         customer_address=data.get("address") or "",
         analysis_date=parsed_date,
@@ -600,6 +614,7 @@ async def process_excel_streaming(
     tenant_id: str,
     username: str,
     display_name: str = "",
+    bpm_no: str = "",
 ):
     """阶段2+3：并行调用 LLM 提取，实时产出 SSE 进度事件，最后写库（含去重）"""
     total = len(blocks)
@@ -705,7 +720,7 @@ async def process_excel_streaming(
                 continue
             try:
                 data = _patch_cost_summary_from_excel(r["data"], saved_path, r.get("block"))
-                code = _write_one_quotation(db, data, tenant_id, username, saved_path, display_name)
+                code = _write_one_quotation(db, data, tenant_id, username, saved_path, display_name, bpm_no)
                 if code:
                     db_success += 1
                     logger.info(f"[{code}] DB 写入完成")
@@ -768,6 +783,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
     rows = (
         db.query(
             QuotationMain.quotation_code,
+            QuotationMain.bpm_no,
             QuotationMain.customer_name,
             QuotationMain.product_spec,
             QuotationMain.creator,
@@ -785,13 +801,14 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
     # 按日期分组
     from collections import OrderedDict
     groups = OrderedDict()
-    for code, customer, spec, creator, create_date, create_time, path, extracted_tags in rows:
+    for code, bpm_no, customer, spec, creator, create_date, create_time, path, extracted_tags in rows:
         from app.services.excel_preview_service import get_review_status_from_tags
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
         groups[date_key].append({
             "quotation_code": code,
+            "bpm_no": bpm_no or "",
             "customer_name": customer or "",
             "product_spec": spec or "",
             "upload_user": creator or "",
@@ -806,14 +823,21 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
     ]
 
 
-def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_name: str, is_admin: bool = False) -> bool:
+def delete_quotation(
+    db: Session,
+    quotation_code: str,
+    tenant_id: str,
+    creator_name: str,
+    is_admin: bool = False,
+    is_reviewer: bool = False,
+) -> bool:
     """删除指定成本分析号（管理员可删任意，普通用户仅可删自己），返回是否成功"""
     filters = [
         QuotationMain.quotation_code == quotation_code,
         QuotationMain.tenant_id == tenant_id,
         QuotationMain.deleted == False,
     ]
-    if not is_admin:
+    if not is_admin and not is_reviewer:
         filters.append(QuotationMain.creator == creator_name)
 
     q = db.query(QuotationMain).filter(*filters).first()
@@ -835,7 +859,7 @@ def delete_quotation(db: Session, quotation_code: str, tenant_id: str, creator_n
 
 
 # 保留同步版本，兼容旧的调用方式
-def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, username: str) -> dict:
+def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, username: str, bpm_no: str = "") -> dict:
     """同步版：保存文件 + 扫描 + 串行 LLM + 写入（兼容旧接口）"""
     file_ext = os.path.splitext(file.filename)[1]
     unique_filename = f"{uuid.uuid4().hex}{file_ext}"
@@ -867,7 +891,7 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
 
             t1 = time.time()
             data = _patch_cost_summary_from_excel(data, saved_path, block)
-            quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path)
+            quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path, bpm_no=bpm_no)
             t_db = time.time() - t1
 
             if quotation_code:

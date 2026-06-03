@@ -11,6 +11,7 @@ class QuotationMain(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(String(50), index=True, comment="租户ID")
     quotation_code = Column(String(100), index=True, comment="报价单编号 (如: FHLR2GCB2G-50-003)")
+    bpm_no = Column(String(100), index=True, comment="BPM流程号")
     customer_name = Column(String(200), comment="客户名称 (如: 800木轴 500 米)")
     customer_code = Column(String(100), comment="客户代号 (如: 6010634)")
     customer_address = Column(String(500), comment="客户地址")
