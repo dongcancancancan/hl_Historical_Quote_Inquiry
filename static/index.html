@@ -225,7 +225,7 @@
                             uploader +
                             '<span class="text-xs text-gray-400">' + time + '</span>' +
                             (it.review_status === 'quoted' ? '<span class="text-xs text-green-600">已报价</span>' :
-                            '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>') +
+                            ((isAdmin || it.upload_user === displayName) ? '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>' : '')) +
                         '</div>' +
                     '</div>';
                 }).join('');

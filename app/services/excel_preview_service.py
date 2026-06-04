@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.orm import Session
 
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
+from app.models.user import User
 
 
 MAIN_FIELDS = {
@@ -75,15 +76,32 @@ def get_accessible_quotation(
     is_admin: bool = False,
     is_reviewer: bool = False,
 ) -> QuotationMain | None:
+    from sqlalchemy import or_
+
     filters = [
         QuotationMain.quotation_code == quotation_code,
         QuotationMain.deleted == False,
     ]
-    if not is_reviewer:
-        filters.append(QuotationMain.tenant_id == tenant_id)
     if not is_admin and not is_reviewer:
-        filters.append(QuotationMain.creator == creator_name)
-    return db.query(QuotationMain).filter(*filters).first()
+        filters.append(or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)))
+        admin_names = _admin_creator_names(db)
+        if admin_names:
+            filters.append(QuotationMain.creator.notin_(admin_names))
+    quotation = db.query(QuotationMain).filter(*filters).first()
+    if quotation and not is_reviewer and get_review_status(quotation) == REVIEW_QUOTED:
+        return None
+    return quotation
+
+
+def _admin_creator_names(db: Session) -> list[str]:
+    rows = db.query(User.username, User.display_name).filter(User.is_admin == True).all()
+    names = set()
+    for username, display_name in rows:
+        if username:
+            names.add(username)
+        if display_name:
+            names.add(display_name)
+    return list(names)
 
 
 def get_review_status(quotation: QuotationMain) -> str:

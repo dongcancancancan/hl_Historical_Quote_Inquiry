@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from openpyxl import load_workbook
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from fastapi import UploadFile
 from openai import AsyncOpenAI
@@ -16,6 +17,7 @@ from openai import AsyncOpenAI
 from app.models.calc_param import QuotationCalcParam
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
+from app.models.user import User
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,21 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 }}"""
 
 _mat_code_pattern = re.compile(r'((?:EX|EE|PA|D|V|C)\d+[A-Z]*)', re.IGNORECASE)
+
+
+def _admin_creator_names(db: Session, tenant_id: str) -> list[str]:
+    rows = (
+        db.query(User.username, User.display_name)
+        .filter(User.is_admin == True)
+        .all()
+    )
+    names = set()
+    for username, display_name in rows:
+        if username:
+            names.add(username)
+        if display_name:
+            names.add(display_name)
+    return list(names)
 
 
 @dataclass
@@ -553,6 +570,30 @@ def _quotation_exists(db: Session, quotation_code: str, tenant_id: str) -> bool:
     ).first() is not None
 
 
+def _delete_quotation_fk_children(db: Session, quotation_id: int) -> None:
+    """Delete all direct children that reference quotation_main before deleting main."""
+    rows = db.execute(text("""
+        SELECT
+            OBJECT_SCHEMA_NAME(fkc.parent_object_id) AS child_schema,
+            OBJECT_NAME(fkc.parent_object_id) AS child_table,
+            pc.name AS child_column
+        FROM sys.foreign_key_columns fkc
+        JOIN sys.columns pc
+          ON pc.object_id = fkc.parent_object_id
+         AND pc.column_id = fkc.parent_column_id
+        WHERE OBJECT_NAME(fkc.referenced_object_id) = 'quotation_main'
+        ORDER BY OBJECT_NAME(fkc.parent_object_id)
+    """)).mappings().all()
+    for row in rows:
+        schema = str(row["child_schema"]).replace("]", "]]")
+        table = str(row["child_table"]).replace("]", "]]")
+        column = str(row["child_column"]).replace("]", "]]")
+        db.execute(
+            text(f"DELETE FROM [{schema}].[{table}] WHERE [{column}] = :quotation_id"),
+            {"quotation_id": quotation_id},
+        )
+
+
 def _write_one_quotation(
     db: Session,
     data: dict,
@@ -835,14 +876,16 @@ async def process_excel_streaming(
 
 def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin: bool = False, limit: int = 500):
     """查询报价单明细（按日期分组），管理员可查看所有"""
-    from sqlalchemy import func, Date
+    from sqlalchemy import func, Date, or_
 
     filters = [
-        QuotationMain.tenant_id == tenant_id,
         QuotationMain.deleted == False,
     ]
     if not is_admin:
-        filters.append(QuotationMain.creator == creator_name)
+        filters.append(or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)))
+        admin_names = _admin_creator_names(db, tenant_id)
+        if admin_names:
+            filters.append(QuotationMain.creator.notin_(admin_names))
 
     rows = (
         db.query(
@@ -866,7 +909,10 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
     from collections import OrderedDict
     groups = OrderedDict()
     for code, bpm_no, customer, spec, creator, create_date, create_time, path, extracted_tags in rows:
-        from app.services.excel_preview_service import get_review_status_from_tags
+        from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status_from_tags
+        review_status = get_review_status_from_tags(extracted_tags)
+        if review_status == REVIEW_QUOTED:
+            continue
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
@@ -878,7 +924,7 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
             "upload_user": creator or "",
             "create_time": create_time.isoformat() if create_time else None,
             "filename": os.path.basename(path) if path else "",
-            "review_status": get_review_status_from_tags(extracted_tags),
+            "review_status": review_status,
         })
 
     return [
@@ -896,12 +942,14 @@ def delete_quotation(
     is_reviewer: bool = False,
 ) -> bool:
     """删除指定成本分析号（管理员可删任意，普通用户仅可删自己），返回是否成功"""
+    from sqlalchemy import or_
+
     filters = [
         QuotationMain.quotation_code == quotation_code,
-        QuotationMain.tenant_id == tenant_id,
         QuotationMain.deleted == False,
     ]
     if not is_admin and not is_reviewer:
+        filters.append(or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)))
         filters.append(QuotationMain.creator == creator_name)
 
     q = db.query(QuotationMain).filter(*filters).first()
@@ -910,12 +958,7 @@ def delete_quotation(
     from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
     if get_review_status(q) == REVIEW_QUOTED:
         return False
-    db.query(QuotationCalculationTrace).filter(
-        QuotationCalculationTrace.quotation_main_id == q.id,
-    ).delete(synchronize_session=False)
-    db.query(QuotationCalcParam).filter(
-        QuotationCalcParam.quotation_main_id == q.id,
-    ).delete(synchronize_session=False)
+    _delete_quotation_fk_children(db, q.id)
     db.delete(q)
     db.commit()
     logger.info(f"[{quotation_code}] 已由 {creator_name} 删除 (admin={is_admin})")
