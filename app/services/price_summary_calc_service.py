@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
+from app.services.quotation_summary_service import apply_quotation_summaries
 
 
 def calculate_price_summary(db: Session, quotation: QuotationMain, operator: str) -> dict:
@@ -18,6 +19,7 @@ def calculate_price_summary(db: Session, quotation: QuotationMain, operator: str
     if net_profit_rate >= Decimal("1"):
         raise ValueError("净利率不能大于或等于 100%")
 
+    apply_quotation_summaries(quotation)
     materials = [item for item in quotation.materials if not item.deleted]
     calculated_unit_usage_sum = sum((_decimal(item.unit_usage) for item in materials), Decimal("0")) / Decimal("100")
     calculated_material_amount_sum = sum((_decimal(item.material_amount) for item in materials), Decimal("0"))

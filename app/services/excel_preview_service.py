@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.models.user import User
+from app.services.quotation_summary_service import apply_quotation_summaries
 
 
 MAIN_FIELDS = {
@@ -205,8 +206,7 @@ def update_quotation_fields(
             target.updater = updater
             target.update_time = now
 
-    quotation.updater = updater
-    quotation.update_time = now
+    apply_quotation_summaries(quotation, materials.values(), processes.values(), updater, now)
     db.commit()
     return quotation.quotation_code
 
@@ -247,6 +247,7 @@ def _parse_update_value(raw_value, field_type: str):
 
 def render_quotation_preview(quotation: QuotationMain) -> str:
     """Render a cost-analysis worksheet from structured database fields only."""
+    apply_quotation_summaries(quotation)
     materials = sorted(
         (item for item in quotation.materials if not item.deleted),
         key=lambda item: (item.seq_no or 0, item.id or 0),

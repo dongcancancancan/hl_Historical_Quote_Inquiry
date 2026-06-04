@@ -32,7 +32,7 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
         if not item.deleted and _is_conductor_row(item)
     ]
     if not conductor_rows:
-        raise ValueError("未找到导体类制程行")
+        raise ValueError("未找到导体/编织类制程行")
 
     calculated = 0
     process_calculated = 0
@@ -82,11 +82,11 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
             "wire_processing_fee": str(wire_fee),
             "unit_usage": str(item.unit_usage or 0),
         }
-        formula = "导体单价 = (铜价 + 铜杆加工费) / 1000 / 增值税率 + 铜加工费"
+        formula = "导体/编织单价 = (铜价 + 铜杆加工费) / 1000 / 增值税率 + 铜加工费"
         process_text = (
             f"从 {parsed['source_field']} 解析到 {parsed['diameter']}{parsed['copper_type']}；"
             f"铜加工费匹配 {fee.diameter}{fee.copper_type} = {wire_fee} 元/KG。\n"
-            f"导体单价 = ({copper_price} + {rod_fee}) / 1000 / {vat_rate} + {wire_fee} = {unit_price}\n"
+            f"导体/编织单价 = ({copper_price} + {rod_fee}) / 1000 / {vat_rate} + {wire_fee} = {unit_price}\n"
             f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
         )
         _add_trace(db, quotation, item, "unit_price", formula, input_data, process_text, unit_price, operator)
@@ -95,7 +95,7 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
             quotation,
             item,
             "material_amount",
-            "材料金额 = BOM用量 × 导体单价",
+            "材料金额 = BOM用量 × 导体/编织单价",
             input_data,
             process_text,
             material_amount,
@@ -131,7 +131,7 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
         })
         fee_process_text = (
             f"匹配制程费用行：{process.process_name or item.process_name or ''}\n"
-            f"金额 = 开机损耗废线 {startup_loss_wire} × 铜绞材料金额 {material_amount} = {process_amount}\n"
+            f"金额 = 开机损耗废线 {startup_loss_wire} × 材料金额 {material_amount} = {process_amount}\n"
             f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
         )
         _add_trace(
@@ -139,7 +139,7 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
             quotation,
             item,
             "process_amount",
-            "金额 = 开机损耗废线 × 铜绞材料金额",
+            "金额 = 开机损耗废线 × 材料金额",
             process_input,
             fee_process_text,
             process_amount,
@@ -158,7 +158,10 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
         )
 
     if calculated == 0:
-        message = "；".join(item["reason"] for item in skipped) or "没有可计算的导体行"
+        message = "；".join(item["reason"] for item in skipped) or "没有可计算的导体/编织行"
+        raise ValueError(message)
+    if skipped:
+        message = "；".join(item["reason"] for item in skipped)
         raise ValueError(message)
 
     _recalculate_material_summary(quotation, operator, now)
@@ -196,7 +199,13 @@ def list_conductor_traces(db: Session, quotation: QuotationMain) -> list[dict]:
 
 def _is_conductor_row(item: QuotationMaterial) -> bool:
     text = f"{item.process_name or ''} {item.process_code or ''} {item.spec_detail or ''}".upper()
-    return "铜" in (item.process_name or "") or "导体" in (item.process_name or "") or bool(COPPER_CODE_RE.search(text))
+    process_name = item.process_name or ""
+    return (
+        "铜" in process_name
+        or "导体" in process_name
+        or "编织" in process_name
+        or bool(COPPER_CODE_RE.search(text))
+    )
 
 
 def _match_process_fee_row(
@@ -225,7 +234,7 @@ def _normalize_process_name(value) -> str:
 
 def _is_conductor_process(process: QuotationProcessFee) -> bool:
     name = process.process_name or ""
-    return "铜" in name or "导体" in name
+    return "铜" in name or "导体" in name or "编织" in name
 
 
 def _parse_copper_code(item: QuotationMaterial) -> dict | None:

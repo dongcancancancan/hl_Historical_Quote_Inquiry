@@ -13,6 +13,13 @@ from app.services.conductor_calc_service import (
     _parse_copper_code,
 )
 from app.services.excel_preview_service import get_review_status
+from app.services.glue_calc_service import (
+    _is_core_conductor_row,
+    _is_insulation_row,
+    _is_jacket_row,
+    _match_insulation_process_fee_row,
+    _match_jacket_process_fee_row,
+)
 
 
 def build_copper_bands() -> list[dict]:
@@ -126,11 +133,44 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
                 _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
             )
 
+    for item in [row for row in quotation.materials if not row.deleted and _is_insulation_row(row)]:
+        process = _match_insulation_process_fee_row(quotation, item)
+        if not process:
+            continue
+        conductor_amount = _simulated_conductor_material_amount_before(quotation, item, material_amounts)
+        if conductor_amount <= 0:
+            continue
+        insulation_amount = _decimal(item.material_amount)
+        insulation_unit_price = _decimal(item.unit_price)
+        process_amount = _round4(
+            _decimal(process.startup_loss_wire) * (conductor_amount + insulation_amount)
+            + _decimal(process.total_waste_glue) * insulation_unit_price
+        )
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(process.total_waste_glue)
+        )
+
     all_material_amount = sum(
         material_amounts.get(item.id, _decimal(item.material_amount))
         for item in quotation.materials
         if not item.deleted
     )
+
+    for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row)]:
+        process = _match_jacket_process_fee_row(quotation, item)
+        if not process:
+            continue
+        jacket_unit_price = _decimal(item.unit_price)
+        if jacket_unit_price <= 0:
+            continue
+        process_amount = _round4(
+            _decimal(process.startup_loss_wire) * all_material_amount
+            + _decimal(process.total_waste_glue) * jacket_unit_price
+        )
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
+
     unit_usage_sum = _round4(sum(_decimal(item.unit_usage) for item in quotation.materials if not item.deleted) / Decimal("100"))
     material_cost = _round4(all_material_amount / Decimal("100"))
     total_fee = _round4(sum(
@@ -177,6 +217,23 @@ def _required_positive(value, label: str) -> Decimal:
     if result <= 0:
         raise ValueError(f"{label}必须大于 0")
     return result
+
+
+def _simulated_conductor_material_amount_before(quotation: QuotationMain, insulation_item, material_amounts: dict[int, Decimal]) -> Decimal:
+    insulation_seq = insulation_item.seq_no or 0
+    candidates = [
+        item for item in quotation.materials
+        if not item.deleted
+        and item.id != insulation_item.id
+        and _is_core_conductor_row(item)
+        and (not insulation_seq or not item.seq_no or item.seq_no < insulation_seq)
+    ]
+    if not candidates:
+        candidates = [
+            item for item in quotation.materials
+            if not item.deleted and item.id != insulation_item.id and _is_core_conductor_row(item)
+        ]
+    return _round4(sum(material_amounts.get(item.id, _decimal(item.material_amount)) for item in candidates))
 
 
 def _decimal(value) -> Decimal:

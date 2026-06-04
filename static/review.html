@@ -63,10 +63,10 @@
                         <input id="calcVatRate" type="number" min="0" step="0.0001" class="mt-1 w-24 border px-2 py-1 text-xs" value="1.13">
                     </label>
                     <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveCalcParams()">保存参数</button>
-                    <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体</button>
-                    <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看过程</button>
-                    <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料</button>
-                    <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料过程</button>
+                    <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体/编织</button>
+                    <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看导体/编织过程</button>
+                    <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料/外购</button>
+                    <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料/外购过程</button>
                     <button class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">计算售价</button>
                     <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showPriceSummaryTraces()">查看售价过程</button>
                     <span id="calcParamStatus" class="text-xs text-gray-400"></span>
@@ -92,7 +92,7 @@
     <div id="traceModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
         <div class="max-h-[82vh] w-full max-w-5xl overflow-auto border bg-white p-5 shadow-xl">
             <div class="mb-3 flex items-center justify-between">
-                <h2 class="text-sm font-semibold">导体计算过程</h2>
+                <h2 class="text-sm font-semibold">导体/编织计算过程</h2>
                 <button class="text-xl text-gray-500" onclick="closeTraceModal()">×</button>
             </div>
             <div id="traceRows" class="space-y-3 text-xs"></div>
@@ -241,8 +241,8 @@
 
         async function calculateConductor() {
             if (!selectedCode) return;
-            if (!confirm('确认根据铜价和铜加工费重新计算导体单价、材料金额吗？')) return;
-            document.getElementById('calcParamStatus').textContent = '导体计算中...';
+            if (!confirm('确认根据铜价和铜加工费重新计算导体/编织单价、材料金额和制程费用吗？')) return;
+            document.getElementById('calcParamStatus').textContent = '导体/编织计算中...';
             const res = await fetch('/api/v1/etl/quotation/calculate/conductor?code=' + encodeURIComponent(selectedCode), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
@@ -250,7 +250,7 @@
             const data = await res.json();
             if (!res.ok) {
                 document.getElementById('calcParamStatus').textContent = '';
-                return alert('导体计算失败：' + (data.detail || '未知错误'));
+                return alert('导体/编织计算失败：' + (data.detail || '未知错误'));
             }
             document.getElementById('calcParamStatus').textContent = '已计算材料 ' + data.calculated + ' 行，制程费用 ' + (data.process_calculated || 0) + ' 行';
             await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
@@ -270,14 +270,14 @@
                 '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
                 '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
                 '</div>'
-            ).join('') : '<div class="py-6 text-center text-gray-400">暂无导体计算过程</div>';
+            ).join('') : '<div class="py-6 text-center text-gray-400">暂无导体/编织计算过程</div>';
             document.getElementById('traceModal').classList.replace('hidden', 'flex');
         }
 
         async function calculateGlue() {
             if (!selectedCode) return;
-            if (!confirm('确认根据 PVC 母料 BOM 售价重新计算 C 开头胶料单价、材料金额吗？')) return;
-            document.getElementById('calcParamStatus').textContent = '胶料计算中...';
+            if (!confirm('确认重新计算 C 开头胶料、外购物料的单价、材料金额，以及绝缘/外被制程费用吗？')) return;
+            document.getElementById('calcParamStatus').textContent = '胶料/外购计算中...';
             const res = await fetch('/api/v1/etl/quotation/calculate/glue?code=' + encodeURIComponent(selectedCode), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
@@ -285,9 +285,9 @@
             const data = await res.json();
             if (!res.ok) {
                 document.getElementById('calcParamStatus').textContent = '';
-                return alert('胶料计算失败：' + (data.detail || '未知错误'));
+                return alert('胶料/外购计算失败：' + (data.detail || '未知错误'));
             }
-            document.getElementById('calcParamStatus').textContent = '已计算胶料 ' + data.calculated + ' 行';
+            document.getElementById('calcParamStatus').textContent = '已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行';
             await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
         }
 
@@ -297,7 +297,7 @@
                 headers: { 'Authorization': 'Bearer ' + token },
             });
             const data = await res.json();
-            if (!res.ok) return alert('胶料计算过程加载失败：' + (data.detail || '未知错误'));
+            if (!res.ok) return alert('胶料/外购计算过程加载失败：' + (data.detail || '未知错误'));
             const rows = data.items || [];
             document.getElementById('traceRows').innerHTML = rows.length ? rows.map(item =>
                 '<div class="border p-3">' +
@@ -305,7 +305,7 @@
                 '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
                 '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
                 '</div>'
-            ).join('') : '<div class="py-6 text-center text-gray-400">暂无胶料计算过程</div>';
+            ).join('') : '<div class="py-6 text-center text-gray-400">暂无胶料/外购计算过程</div>';
             document.getElementById('traceModal').classList.replace('hidden', 'flex');
         }
 

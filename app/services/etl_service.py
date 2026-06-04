@@ -19,6 +19,7 @@ from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.models.user import User
 from app.core.config import settings
+from app.services.quotation_summary_service import apply_quotation_summaries
 
 logger = logging.getLogger(__name__)
 
@@ -675,10 +676,13 @@ def _write_one_quotation(
     db.add(new_main)
     db.flush()
 
+    material_rows = []
+    process_rows = []
+
     for idx, mat in enumerate(data.get("materials", [])):
         raw_code = mat.get("material_code")
         material_code = str(raw_code).strip() if raw_code and str(raw_code).strip().lower() != "null" else ""
-        db.add(QuotationMaterial(
+        material_row = QuotationMaterial(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
             seq_no=idx + 1,
@@ -690,10 +694,12 @@ def _write_one_quotation(
             process_code=material_code,
             creator=creator_name,
             deleted=False,
-        ))
+        )
+        material_rows.append(material_row)
+        db.add(material_row)
 
     for proc in data.get("processes", []):
-        db.add(QuotationProcessFee(
+        process_row = QuotationProcessFee(
             tenant_id=tenant_id,
             quotation_main_id=new_main.id,
             process_name=proc.get("process_name") or "",
@@ -707,7 +713,11 @@ def _write_one_quotation(
             subtotal_fee=_safe_numeric(proc.get("subtotal_cost")),
             creator=creator_name,
             deleted=False,
-        ))
+        )
+        process_rows.append(process_row)
+        db.add(process_row)
+
+    apply_quotation_summaries(new_main, material_rows, process_rows)
 
     return quotation_code
 

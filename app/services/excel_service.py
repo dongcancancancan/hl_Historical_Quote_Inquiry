@@ -5,6 +5,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.models.quotation import QuotationMain
+from app.services.quotation_summary_service import apply_quotation_summaries
 
 
 THIN_SIDE = Side(style="thin", color="000000")
@@ -20,6 +21,7 @@ PRICE_FILL = PatternFill("solid", fgColor="FFF900")
 
 def render_quotation_excel(quotation: QuotationMain) -> BytesIO:
     """Generate an editable cost-analysis workbook from database fields."""
+    apply_quotation_summaries(quotation)
     materials = sorted(
         (item for item in quotation.materials if not item.deleted),
         key=lambda item: (item.seq_no or 0, item.id or 0),
