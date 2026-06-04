@@ -148,6 +148,70 @@ def _safe_numeric(val, scale: int = 4) -> float:
         return 0.0
 
 
+def _first_json_value(value):
+    if isinstance(value, list):
+        for item in value:
+            if item is not None:
+                return item
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            if item is not None:
+                return item
+        return None
+    return value
+
+
+def _normalize_extraction_shape(data: dict) -> dict:
+    """Normalize LLM JSON into the shape the DB writer expects."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected extraction result dict, got {type(data).__name__}")
+
+    scalar_fields = [
+        "quotation_no",
+        "customer",
+        "address",
+        "date_val",
+        "structure",
+        "product_spec",
+        "braiding_rate",
+    ]
+    for field in scalar_fields:
+        if field in data:
+            data[field] = _first_json_value(data[field])
+
+    raw_codes = data.get("material_codes", [])
+    if isinstance(raw_codes, str):
+        data["material_codes"] = [raw_codes.strip()] if raw_codes.strip() else []
+    elif isinstance(raw_codes, list):
+        data["material_codes"] = [str(item).strip() for item in raw_codes if str(item or "").strip()]
+    else:
+        data["material_codes"] = []
+
+    cost_summary = data.get("cost_summary", {})
+    if isinstance(cost_summary, list):
+        cost_summary = next((item for item in cost_summary if isinstance(item, dict)), {})
+    data["cost_summary"] = cost_summary if isinstance(cost_summary, dict) else {}
+
+    for list_field in ("materials", "processes"):
+        rows = data.get(list_field, [])
+        if isinstance(rows, dict):
+            rows = [rows]
+        elif not isinstance(rows, list):
+            rows = []
+        normalized_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized_rows.append({
+                key: _first_json_value(value)
+                for key, value in row.items()
+            })
+        data[list_field] = normalized_rows
+
+    return data
+
+
 def _parse_excel_numeric(val):
     """Parse raw Excel numeric values, including text percentages like ``17%``."""
     if val is None:
@@ -436,7 +500,7 @@ async def _extract_one_async(block: QuotationBlock, semaphore: asyncio.Semaphore
                         continue
                     raise ValueError(f"LLM returned empty content after 2 attempts")
 
-                return _parse_json(result_str)
+                return _normalize_extraction_shape(_parse_json(result_str))
 
             except json.JSONDecodeError:
                 # 非空但格式不对：记录实际内容便于排查，不重试

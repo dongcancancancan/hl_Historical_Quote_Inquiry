@@ -1,5 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.calc_param import QuotationCalcParam
@@ -35,12 +36,15 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
     if not bpm_no:
         raise ValueError("请填写 BPM 流程号")
 
-    quotations = (
-        db.query(QuotationMain)
-        .filter(QuotationMain.deleted == False, QuotationMain.bpm_no == bpm_no)
-        .order_by(QuotationMain.quotation_code)
-        .all()
-    )
+    codes = _quotation_codes_by_bpm(db, bpm_no)
+    quotations = []
+    if codes:
+        quotations = (
+            db.query(QuotationMain)
+            .filter(QuotationMain.deleted == False, QuotationMain.quotation_code.in_(codes))
+            .order_by(QuotationMain.quotation_code)
+            .all()
+        )
     if not quotations:
         raise ValueError("未找到该 BPM 流程号下的成本分析表")
 
@@ -67,7 +71,7 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
                 errors.append(str(exc))
         rows.append({
             "quotation_code": quotation.quotation_code or "",
-            "bpm_no": quotation.bpm_no or "",
+            "bpm_no": bpm_no,
             "customer_name": quotation.customer_name or "",
             "product_spec": quotation.product_spec or "",
             "review_status": get_review_status(quotation),
@@ -75,7 +79,17 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
             "bands": result_by_band,
             "errors": sorted(set(errors)),
         })
-    return {"bpm_no": bpm_no, "bands": bands, "items": rows}
+    return {"bpm_no": bpm_no, "bands": bands, "items": rows, "mapped_codes": codes}
+
+
+def _quotation_codes_by_bpm(db: Session, bpm_no: str) -> list[str]:
+    rows = db.execute(text("""
+        SELECT DISTINCT [成本分析号] AS quotation_code
+        FROM [HL_QS].[dbo].[BPM_B015_List]
+        WHERE UPPER([流水号]) = :bpm_no
+          AND [成本分析号] IS NOT NULL
+    """), {"bpm_no": bpm_no}).mappings().all()
+    return [str(row["quotation_code"]).strip() for row in rows if str(row["quotation_code"] or "").strip()]
 
 
 def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_price: Decimal) -> dict:
