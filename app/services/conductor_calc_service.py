@@ -200,6 +200,8 @@ def list_conductor_traces(db: Session, quotation: QuotationMain) -> list[dict]:
 def _is_conductor_row(item: QuotationMaterial) -> bool:
     text = f"{item.process_name or ''} {item.process_code or ''} {item.spec_detail or ''}".upper()
     process_name = item.process_name or ""
+    if "芯绞" in process_name:
+        return False
     return (
         "铜" in process_name
         or "导体" in process_name

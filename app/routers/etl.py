@@ -27,6 +27,7 @@ from app.services.conductor_calc_service import calculate_conductor_materials, l
 from app.services.copper_scenario_service import calculate_bpm_copper_scenarios
 from app.services.glue_calc_service import calculate_glue_materials, list_glue_traces
 from app.services.price_summary_calc_service import calculate_price_summary, list_price_summary_traces
+from app.services.full_price_calc_service import calculate_full_price
 from app.services.excel_service import render_quotation_excel
 
 logger = logging.getLogger(__name__)
@@ -436,6 +437,24 @@ def calculate_quotation_price_summary(
         raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限计算")
     try:
         return calculate_price_summary(db, quotation, user.display_name)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/quotation/calculate/full-price")
+def calculate_quotation_full_price(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行最终售价计算")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限计算")
+    try:
+        return calculate_full_price(db, quotation, user.display_name)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))

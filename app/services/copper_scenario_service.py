@@ -14,9 +14,13 @@ from app.services.conductor_calc_service import (
 )
 from app.services.excel_preview_service import get_review_status
 from app.services.glue_calc_service import (
+    _collection_material_amounts,
     _is_core_conductor_row,
+    _is_collection_process,
+    _is_core_twist_row,
     _is_insulation_row,
     _is_jacket_row,
+    _is_rewind_process,
     _match_insulation_process_fee_row,
     _match_jacket_process_fee_row,
 )
@@ -171,6 +175,21 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
             _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
         )
 
+    for process in [row for row in quotation.processes if not row.deleted and _is_rewind_process(row)]:
+        process_amount = _round4(_decimal(process.startup_loss_wire) * all_material_amount)
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
+
+    for process in [row for row in quotation.processes if not row.deleted and _is_collection_process(row)]:
+        amounts = _simulated_collection_material_amounts(quotation, material_amounts)
+        if amounts["copper_amount"] <= 0 or amounts["core_press_amount"] <= 0 or amounts["core_twist_amount"] <= 0:
+            continue
+        process_amount = _round4(_decimal(process.startup_loss_wire) * amounts["total"])
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
+
     unit_usage_sum = _round4(sum(_decimal(item.unit_usage) for item in quotation.materials if not item.deleted) / Decimal("100"))
     material_cost = _round4(all_material_amount / Decimal("100"))
     total_fee = _round4(sum(
@@ -234,6 +253,27 @@ def _simulated_conductor_material_amount_before(quotation: QuotationMain, insula
             if not item.deleted and item.id != insulation_item.id and _is_core_conductor_row(item)
         ]
     return _round4(sum(material_amounts.get(item.id, _decimal(item.material_amount)) for item in candidates))
+
+
+def _simulated_collection_material_amounts(quotation: QuotationMain, material_amounts: dict[int, Decimal]) -> dict[str, Decimal]:
+    copper_amount = _round4(sum(
+        material_amounts.get(item.id, _decimal(item.material_amount))
+        for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item)
+    ))
+    current_amounts = _collection_material_amounts(quotation)
+    core_press_amount = current_amounts["core_press_amount"]
+    core_twist_amount = _round4(sum(
+        _decimal(item.material_amount)
+        for item in quotation.materials
+        if not item.deleted and _is_core_twist_row(item)
+    ))
+    return {
+        "copper_amount": copper_amount,
+        "core_press_amount": core_press_amount,
+        "core_twist_amount": core_twist_amount,
+        "total": _round4(copper_amount + core_press_amount + core_twist_amount),
+    }
 
 
 def _decimal(value) -> Decimal:

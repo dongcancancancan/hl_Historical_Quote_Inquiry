@@ -13,6 +13,7 @@ from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
 
 
 PVC_CODE_RE = re.compile(r"\b(C[A-Z0-9*]{3,})\b", re.IGNORECASE)
+GLUE_CALC_TYPES = ["glue", "external_material", "manual_material", "insulation", "jacket", "rewind", "collection"]
 
 
 def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: str) -> dict:
@@ -23,43 +24,87 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
         item for item in quotation.materials
         if not item.deleted
         and not _is_conductor_row(item)
-        and (_has_c_code(item) or _external_material_code(item) or _is_jacket_row(item))
+        and (_has_c_code(item) or _external_material_code(item) or _is_jacket_row(item) or _is_color_masterbatch_row(item))
     ]
-    if not candidates:
-        raise ValueError("未找到可计算的 C 开头胶料、外购物料或外被制程行")
+    rewind_processes = [item for item in quotation.processes if not item.deleted and _is_rewind_process(item)]
+    collection_processes = [item for item in quotation.processes if not item.deleted and _is_collection_process(item)]
+    if not candidates and not rewind_processes and not collection_processes:
+        raise ValueError("未找到可计算的 C 开头胶料、外购物料、外被、倒线或集合制程行")
 
     calculated = 0
     c_calculated = 0
     external_calculated = 0
+    manual_material_calculated = 0
+    color_masterbatch_calculated = 0
     insulation_process_calculated = 0
     jacket_process_calculated = 0
+    rewind_process_calculated = 0
+    collection_process_calculated = 0
     skipped = []
     hard_errors = []
     now = datetime.now()
 
     db.query(QuotationCalculationTrace).filter(
         QuotationCalculationTrace.quotation_main_id == quotation.id,
-        QuotationCalculationTrace.calc_type.in_(["glue", "external_material", "insulation", "jacket"]),
+        QuotationCalculationTrace.calc_type.in_(GLUE_CALC_TYPES),
     ).delete(synchronize_session=False)
 
     for item in candidates:
         material_calculated = False
-        if _has_c_code(item):
+        if _is_color_masterbatch_row(item):
+            ok = False
+            if _external_material_code(item):
+                ok = _calculate_external_material(db, quotation, item, operator, now)
+                if ok:
+                    external_calculated += 1
+                    color_masterbatch_calculated += 1
+                    material_calculated = True
+            if not ok:
+                manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
+                if manual_ok:
+                    manual_material_calculated += 1
+                    color_masterbatch_calculated += 1
+                    material_calculated = True
+                else:
+                    skipped.append({
+                        "id": item.id,
+                        "reason": _missing_color_masterbatch_price_message(item),
+                    })
+                    continue
+        elif _has_c_code(item):
             ok = _calculate_c_material(db, quotation, item, operator, now)
             if ok:
                 c_calculated += 1
                 material_calculated = True
             else:
-                skipped.append({"id": item.id, "reason": f"未找到 PVC 母料 BOM：{item.process_code or item.spec_detail or ''}"})
-                continue
+                ok = _calculate_external_material(db, quotation, item, operator, now, allow_c_code=True)
+                if ok:
+                    external_calculated += 1
+                    material_calculated = True
+                else:
+                    manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
+                    if manual_ok:
+                        manual_material_calculated += 1
+                        material_calculated = True
+                    else:
+                        skipped.append({"id": item.id, "reason": _missing_pvc_and_external_price_message(item)})
+                        continue
         elif _external_material_code(item):
             ok = _calculate_external_material(db, quotation, item, operator, now)
             if ok:
                 external_calculated += 1
                 material_calculated = True
             else:
-                skipped.append({"id": item.id, "reason": f"未在 v_qs_bzcb 找到外购物料最新单价：{item.process_code or item.spec_detail or ''}"})
-                continue
+                manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
+                if manual_ok:
+                    manual_material_calculated += 1
+                    material_calculated = True
+                else:
+                    skipped.append({
+                        "id": item.id,
+                        "reason": _missing_external_price_message(item),
+                    })
+                    continue
         if material_calculated:
             calculated += 1
         if _is_insulation_row(item):
@@ -76,11 +121,34 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
         elif error:
             hard_errors.append(error)
 
-    if calculated == 0 and insulation_process_calculated == 0 and jacket_process_calculated == 0:
-        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料或外被制程行"
+    for process in rewind_processes:
+        ok, error = _calculate_rewind_process_fee(db, quotation, process, operator, now)
+        if ok:
+            rewind_process_calculated += 1
+        elif error:
+            hard_errors.append(error)
+
+    for process in collection_processes:
+        ok, error = _calculate_collection_process_fee(db, quotation, process, operator, now)
+        if ok:
+            collection_process_calculated += 1
+        elif error:
+            hard_errors.append(error)
+
+    if (
+        calculated == 0
+        and insulation_process_calculated == 0
+        and jacket_process_calculated == 0
+        and rewind_process_calculated == 0
+        and collection_process_calculated == 0
+    ):
+        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、倒线或集合制程行"
         raise ValueError(message)
     if hard_errors:
-        raise ValueError("；".join(hard_errors))
+        skipped_messages = [item["reason"] for item in skipped]
+        raise ValueError("；".join(skipped_messages + hard_errors))
+    if skipped:
+        raise ValueError("；".join(item["reason"] for item in skipped))
 
     _recalculate_material_summary(quotation, operator, now)
     _recalculate_process_summary(quotation, operator, now)
@@ -89,8 +157,12 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
         "calculated": calculated,
         "c_calculated": c_calculated,
         "external_calculated": external_calculated,
+        "manual_material_calculated": manual_material_calculated,
+        "color_masterbatch_calculated": color_masterbatch_calculated,
         "insulation_process_calculated": insulation_process_calculated,
         "jacket_process_calculated": jacket_process_calculated,
+        "rewind_process_calculated": rewind_process_calculated,
+        "collection_process_calculated": collection_process_calculated,
         "skipped": skipped,
     }
 
@@ -100,7 +172,7 @@ def list_glue_traces(db: Session, quotation: QuotationMain) -> list[dict]:
         db.query(QuotationCalculationTrace)
         .filter(
             QuotationCalculationTrace.quotation_main_id == quotation.id,
-            QuotationCalculationTrace.calc_type.in_(["glue", "external_material", "insulation", "jacket"]),
+            QuotationCalculationTrace.calc_type.in_(GLUE_CALC_TYPES),
         )
         .order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc())
         .limit(300)
@@ -156,8 +228,15 @@ def _calculate_c_material(db: Session, quotation: QuotationMain, item: Quotation
     return True
 
 
-def _calculate_external_material(db: Session, quotation: QuotationMain, item: QuotationMaterial, operator: str, now: datetime) -> bool:
-    material_code = _external_material_code(item)
+def _calculate_external_material(
+    db: Session,
+    quotation: QuotationMain,
+    item: QuotationMaterial,
+    operator: str,
+    now: datetime,
+    allow_c_code: bool = False,
+) -> bool:
+    material_code = _external_material_code(item, allow_c_code=allow_c_code)
     if not material_code:
         return False
     lookup = _resolve_external_material_price(db, material_code)
@@ -216,6 +295,71 @@ def _calculate_external_material(db: Session, quotation: QuotationMain, item: Qu
         operator,
         "external_material",
     )
+    return True
+
+
+def _calculate_manual_price_material(db: Session, quotation: QuotationMain, item: QuotationMaterial, operator: str, now: datetime) -> bool:
+    unit_price = Decimal(item.unit_price or 0)
+    material_amount = Decimal(item.material_amount or 0)
+    material_code = _external_material_code(item, allow_c_code=True) or item.process_code or item.spec_detail or ""
+    if unit_price <= 0 and material_amount <= 0:
+        return False
+
+    source = ""
+    if unit_price > 0:
+        material_amount = _round4(Decimal(item.unit_usage or 0) * unit_price)
+        item.material_amount = material_amount
+        source = "手填单价"
+    else:
+        source = "手填材料金额"
+
+    item.updater = operator
+    item.update_time = now
+
+    input_data = {
+        "material_id": item.id,
+        "process_name": item.process_name,
+        "spec_detail": item.spec_detail,
+        "process_code": item.process_code,
+        "source": source,
+        "unit_usage": str(item.unit_usage or 0),
+        "unit_price": str(unit_price),
+        "material_amount": str(material_amount),
+        "missing_external_price": material_code,
+    }
+    if unit_price > 0:
+        process_text = (
+            f"物料编号 {material_code} 未在价格源命中，使用审价人员手填单价 {unit_price}。\n"
+            f"材料金额 = BOM用量 {item.unit_usage or 0} × 手填单价 {unit_price} = {material_amount}"
+        )
+        _add_trace(
+            db,
+            quotation,
+            item,
+            "material_amount",
+            "材料金额 = BOM用量 × 手填单价",
+            input_data,
+            process_text,
+            material_amount,
+            operator,
+            "manual_material",
+        )
+    else:
+        process_text = (
+            f"物料编号 {material_code} 未在价格源命中，使用审价人员手填材料金额 {material_amount} 继续后续计算。"
+        )
+        _add_trace(
+            db,
+            quotation,
+            item,
+            "material_amount",
+            "材料金额 = 手填材料金额",
+            input_data,
+            process_text,
+            material_amount,
+            operator,
+            "manual_material",
+        )
     return True
 
 
@@ -377,6 +521,144 @@ def _calculate_jacket_process_fee(
     return True, ""
 
 
+def _calculate_rewind_process_fee(
+    db: Session,
+    quotation: QuotationMain,
+    process,
+    operator: str,
+    now: datetime,
+) -> tuple[bool, str]:
+    material_amount_sum = _material_amount_sum(quotation)
+    if material_amount_sum <= 0:
+        return False, "倒线制程计算需要先计算材料金额总和"
+
+    startup_loss_wire = Decimal(process.startup_loss_wire or 0)
+    fixed_fee = Decimal(process.fixed_fee or 0)
+    startup_times = Decimal(quotation.order_startup_times or 0)
+
+    process_amount = _round4(startup_loss_wire * material_amount_sum)
+    subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
+
+    process.amount = process_amount
+    process.subtotal_fee = subtotal_fee
+    process.updater = operator
+    process.update_time = now
+
+    input_data = {
+        "process_fee_id": process.id,
+        "process_fee_name": process.process_name,
+        "material_amount_sum": str(material_amount_sum),
+        "startup_loss_wire": str(startup_loss_wire),
+        "fixed_fee": str(fixed_fee),
+        "startup_times": str(startup_times),
+        "startup_times_source": "quotation_main.order_startup_times",
+    }
+    process_text = (
+        f"匹配倒线制程费用行：{process.process_name or ''}\n"
+        f"金额 = 开机损耗废线 {startup_loss_wire} × 材料金额总和 {material_amount_sum} = {process_amount}\n"
+        f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_amount",
+        "倒线金额 = 开机损耗废线 × 材料金额总和",
+        input_data,
+        process_text,
+        process_amount,
+        operator,
+        "rewind",
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_subtotal_fee",
+        "倒线费用成本小计 = 固定费用 + 金额 × 订单开机次数",
+        input_data,
+        process_text,
+        subtotal_fee,
+        operator,
+        "rewind",
+    )
+    return True, ""
+
+
+def _calculate_collection_process_fee(
+    db: Session,
+    quotation: QuotationMain,
+    process,
+    operator: str,
+    now: datetime,
+) -> tuple[bool, str]:
+    amounts = _collection_material_amounts(quotation)
+    if amounts["copper_amount"] <= 0:
+        return False, _missing_collection_amount_message(quotation, "铜绞", _is_core_conductor_row)
+    if amounts["core_press_amount"] <= 0:
+        return False, _missing_collection_amount_message(quotation, "芯押", _is_insulation_row)
+    if amounts["core_twist_amount"] <= 0:
+        return False, _missing_collection_amount_message(quotation, "芯绞", _is_core_twist_row)
+
+    startup_loss_wire = Decimal(process.startup_loss_wire or 0)
+    fixed_fee = Decimal(process.fixed_fee or 0)
+    startup_times = Decimal(quotation.order_startup_times or 0)
+    material_amount_sum = amounts["total"]
+
+    process_amount = _round4(startup_loss_wire * material_amount_sum)
+    subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
+
+    process.amount = process_amount
+    process.subtotal_fee = subtotal_fee
+    process.updater = operator
+    process.update_time = now
+
+    input_data = {
+        "process_fee_id": process.id,
+        "process_fee_name": process.process_name,
+        "copper_material_amount": str(amounts["copper_amount"]),
+        "core_press_material_amount": str(amounts["core_press_amount"]),
+        "core_twist_material_amount": str(amounts["core_twist_amount"]),
+        "collection_material_amount_sum": str(material_amount_sum),
+        "startup_loss_wire": str(startup_loss_wire),
+        "fixed_fee": str(fixed_fee),
+        "startup_times": str(startup_times),
+        "startup_times_source": "quotation_main.order_startup_times",
+    }
+    process_text = (
+        f"匹配集合制程费用行：{process.process_name or ''}\n"
+        f"参与材料金额 = 铜绞 {amounts['copper_amount']} + 芯押 {amounts['core_press_amount']}"
+        f" + 芯绞 {amounts['core_twist_amount']} = {material_amount_sum}\n"
+        f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {material_amount_sum} = {process_amount}\n"
+        f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_amount",
+        "集合金额 = 集合开机损耗废线 × (铜绞材料金额 + 芯押材料金额 + 芯绞材料金额)",
+        input_data,
+        process_text,
+        process_amount,
+        operator,
+        "collection",
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_subtotal_fee",
+        "集合费用成本小计 = 固定费用 + 金额 × 订单开机次数",
+        input_data,
+        process_text,
+        subtotal_fee,
+        operator,
+        "collection",
+    )
+    return True, ""
+
+
 def _has_c_code(item: QuotationMaterial) -> bool:
     return any(_candidate_codes(item))
 
@@ -434,13 +716,37 @@ def _normalize_code_candidates(code: str) -> list[str]:
     return list(dict.fromkeys(item for item in candidates if item.startswith("C")))
 
 
-def _external_material_code(item: QuotationMaterial) -> str:
+def _external_material_code(item: QuotationMaterial, allow_c_code: bool = False) -> str:
     if _is_conductor_row(item):
         return ""
     raw_code = str(item.process_code or "").strip().upper()
-    if not raw_code or raw_code.startswith("C") or raw_code in {"新开发", "NULL", "NONE", "-"}:
+    if not raw_code or raw_code in {"新开发", "NULL", "NONE", "-"}:
+        return ""
+    if raw_code.startswith("C") and not allow_c_code and not _is_color_masterbatch_row(item):
         return ""
     return raw_code
+
+
+def _missing_external_price_message(item: QuotationMaterial) -> str:
+    code = item.process_code or item.spec_detail or ""
+    process = item.process_name or "物料"
+    return f"{process}（料号：{code}）未在外购价格视图 v_qs_bzcb 查到单价；请维护外购价格，或在表格中手填单价/材料金额后保存再计算"
+
+
+def _missing_color_masterbatch_price_message(item: QuotationMaterial) -> str:
+    code = str(item.process_code or "").strip()
+    if not code:
+        return "色母物料编码为空；请填写物料编码，或手填单价/材料金额后保存再计算"
+    return _missing_external_price_message(item)
+
+
+def _missing_pvc_and_external_price_message(item: QuotationMaterial) -> str:
+    code = item.process_code or item.spec_detail or ""
+    process = item.process_name or "物料"
+    return (
+        f"{process}（料号：{code}）未在 PVC 母料 BOM 和外购价格视图 v_qs_bzcb 中查到单价；"
+        "请维护内部 BOM/外购价格，或在表格中手填单价/材料金额后保存再计算"
+    )
 
 
 def _is_insulation_row(item: QuotationMaterial) -> bool:
@@ -448,14 +754,32 @@ def _is_insulation_row(item: QuotationMaterial) -> bool:
     return "绝缘" in name or "芯押" in name
 
 
+def _is_core_twist_row(item: QuotationMaterial) -> bool:
+    name = str(item.process_name or "")
+    return "芯绞" in name
+
+
+def _is_color_masterbatch_row(item: QuotationMaterial) -> bool:
+    text = f"{item.process_name or ''} {item.spec_detail or ''}"
+    return "色母" in text
+
+
 def _is_jacket_row(item: QuotationMaterial) -> bool:
     name = str(item.process_name or "")
-    return "外被" in name or "护套" in name or "外护" in name
+    return not _is_color_masterbatch_row(item) and ("外被" in name or "护套" in name or "外护" in name)
 
 
 def _is_core_conductor_row(item: QuotationMaterial) -> bool:
     name = str(item.process_name or "")
-    return ("铜" in name or "导体" in name or bool(re.search(r"(\d+(?:\.\d+)?)\s*(BC|TC)", f"{item.process_code or ''} {item.spec_detail or ''}", re.IGNORECASE))) and "编织" not in name
+    return (
+        "芯绞" not in name
+        and "编织" not in name
+        and (
+            "铜" in name
+            or "导体" in name
+            or bool(re.search(r"(\d+(?:\.\d+)?)\s*(BC|TC)", f"{item.process_code or ''} {item.spec_detail or ''}", re.IGNORECASE))
+        )
+    )
 
 
 def _match_insulation_process_fee_row(quotation: QuotationMain, material: QuotationMaterial):
@@ -494,6 +818,16 @@ def _is_jacket_process(process) -> bool:
     return "外被" in name or "护套" in name or "外护" in name
 
 
+def _is_rewind_process(process) -> bool:
+    name = str(process.process_name or "")
+    return "倒线" in name
+
+
+def _is_collection_process(process) -> bool:
+    name = str(process.process_name or "")
+    return "集合" in name
+
+
 def _normalize_process_name(value) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
 
@@ -523,11 +857,46 @@ def _material_amount_sum(quotation: QuotationMain) -> Decimal:
     ))
 
 
+def _collection_material_amounts(quotation: QuotationMain) -> dict[str, Decimal]:
+    copper_amount = _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item)
+    ))
+    core_press_amount = _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in quotation.materials
+        if not item.deleted and _is_insulation_row(item)
+    ))
+    core_twist_amount = _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in quotation.materials
+        if not item.deleted and _is_core_twist_row(item)
+    ))
+    return {
+        "copper_amount": copper_amount,
+        "core_press_amount": core_press_amount,
+        "core_twist_amount": core_twist_amount,
+        "total": _round4(copper_amount + core_press_amount + core_twist_amount),
+    }
+
+
+def _missing_collection_amount_message(quotation: QuotationMain, label: str, matcher) -> str:
+    rows = [item for item in quotation.materials if not item.deleted and matcher(item)]
+    if not rows:
+        return f"集合制程计算缺少{label}材料行"
+    details = "、".join(
+        f"{item.process_name or label}（料号：{item.process_code or item.spec_detail or '-'}，材料金额：{_decimal_text(item.material_amount)}）"
+        for item in rows
+    )
+    return f"集合制程计算需要先计算{label}材料金额；当前{details}。请先计算对应单价，或手填单价/材料金额后保存再计算"
+
+
 def _add_trace(db, quotation, item, field_name, formula, input_data, process_text, result_value, operator, calc_type: str):
     db.add(QuotationCalculationTrace(
         quotation_main_id=quotation.id,
         quotation_code=quotation.quotation_code or "",
-        material_id=item.id,
+        material_id=item.id if item is not None else None,
         calc_type=calc_type,
         field_name=field_name,
         formula=formula,

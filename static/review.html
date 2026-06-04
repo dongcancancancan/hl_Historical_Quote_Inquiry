@@ -6,6 +6,12 @@
     <link rel="icon" href="data:,">
     <title>审价科工作台</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .sidebar-panel.collapsed .sidebar-body { display: none; }
+        .sidebar-panel.collapsed .sidebar-collapsed-label { display: flex; }
+        .sidebar-panel.collapsed { overflow: hidden; }
+        .sidebar-collapsed-label { writing-mode: vertical-rl; text-orientation: mixed; }
+    </style>
 </head>
 <body class="h-screen overflow-hidden bg-gray-100 font-sans text-gray-800">
     <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
@@ -24,16 +30,25 @@
         </div>
     </header>
 
-    <main class="grid h-[calc(100vh-56px)] grid-cols-[320px_minmax(0,1fr)_320px] gap-3 p-3">
-        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
-            <div class="border-b p-3">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-sm font-semibold text-orange-700">待报价</h2>
-                    <span id="pendingCount" class="text-xs text-gray-400">0</span>
+    <main id="reviewLayout" class="grid h-[calc(100vh-56px)] gap-3 p-3" style="grid-template-columns: 320px minmax(0,1fr) 320px;">
+        <aside id="pendingPanel" class="sidebar-panel flex min-h-0 flex-col border bg-white shadow-sm">
+            <button class="sidebar-collapsed-label hidden h-full w-full items-center justify-center gap-2 bg-orange-50 text-xs font-semibold text-orange-700 hover:bg-orange-100" onclick="toggleSidebar('pending')" title="展开待报价">
+                <span>待报价</span>
+                <span id="pendingCollapsedCount" class="font-mono text-gray-500">0</span>
+            </button>
+            <div class="sidebar-body flex min-h-0 flex-1 flex-col">
+                <div class="border-b p-3">
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="flex min-w-0 items-center gap-2">
+                            <h2 class="text-sm font-semibold text-orange-700">待报价</h2>
+                            <span id="pendingCount" class="text-xs text-gray-400">0</span>
+                        </div>
+                        <button class="border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50" onclick="toggleSidebar('pending')" title="收起待报价">‹</button>
+                    </div>
+                    <input id="pendingSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-orange-400" placeholder="搜索成本分析号..." oninput="renderLists()">
                 </div>
-                <input id="pendingSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-orange-400" placeholder="搜索成本分析号..." oninput="renderLists()">
+                <div id="pendingList" class="flex-1 overflow-y-auto p-2"></div>
             </div>
-            <div id="pendingList" class="flex-1 overflow-y-auto p-2"></div>
         </aside>
 
         <section class="flex min-h-0 min-w-0 flex-col border bg-white shadow-sm">
@@ -63,12 +78,17 @@
                         <input id="calcVatRate" type="number" min="0" step="0.0001" class="mt-1 w-24 border px-2 py-1 text-xs" value="1.13">
                     </label>
                     <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveCalcParams()">保存参数</button>
-                    <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体/编织</button>
-                    <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看导体/编织过程</button>
-                    <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料/外购</button>
-                    <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料/外购过程</button>
-                    <button class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">计算售价</button>
+                    <button class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">一键计算最终售价</button>
                     <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showPriceSummaryTraces()">查看售价过程</button>
+                    <details class="text-xs text-gray-600">
+                        <summary class="cursor-pointer border px-3 py-1 hover:bg-white">高级计算</summary>
+                        <div class="mt-2 flex flex-wrap gap-2 border bg-white p-2">
+                            <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体/编织</button>
+                            <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看导体/编织过程</button>
+                            <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料/外购</button>
+                            <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料/外购过程</button>
+                        </div>
+                    </details>
                     <span id="calcParamStatus" class="text-xs text-gray-400"></span>
                 </div>
             </div>
@@ -77,15 +97,24 @@
             <iframe id="sheetFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="成本分析表"></iframe>
         </section>
 
-        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
-            <div class="border-b p-3">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-sm font-semibold text-green-700">已报价</h2>
-                    <span id="quotedCount" class="text-xs text-gray-400">0</span>
+        <aside id="quotedPanel" class="sidebar-panel flex min-h-0 flex-col border bg-white shadow-sm">
+            <button class="sidebar-collapsed-label hidden h-full w-full items-center justify-center gap-2 bg-green-50 text-xs font-semibold text-green-700 hover:bg-green-100" onclick="toggleSidebar('quoted')" title="展开已报价">
+                <span>已报价</span>
+                <span id="quotedCollapsedCount" class="font-mono text-gray-500">0</span>
+            </button>
+            <div class="sidebar-body flex min-h-0 flex-1 flex-col">
+                <div class="border-b p-3">
+                    <div class="flex items-center justify-between gap-2">
+                        <button class="border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50" onclick="toggleSidebar('quoted')" title="收起已报价">›</button>
+                        <div class="flex min-w-0 items-center gap-2">
+                            <h2 class="text-sm font-semibold text-green-700">已报价</h2>
+                            <span id="quotedCount" class="text-xs text-gray-400">0</span>
+                        </div>
+                    </div>
+                    <input id="quotedSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-green-400" placeholder="搜索成本分析号..." oninput="renderLists()">
                 </div>
-                <input id="quotedSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-green-400" placeholder="搜索成本分析号..." oninput="renderLists()">
+                <div id="quotedList" class="flex-1 overflow-y-auto p-2"></div>
             </div>
-            <div id="quotedList" class="flex-1 overflow-y-auto p-2"></div>
         </aside>
     </main>
 
@@ -112,6 +141,7 @@
         let quotedItems = [];
         let selectedCode = '';
         let selectedStatus = '';
+        const sidebarCollapsed = { pending: false, quoted: false };
 
         function logout() {
             sessionStorage.clear();
@@ -126,6 +156,18 @@
 
         function formatUploadTime(value) {
             return value ? value.replace('T', ' ').substring(0, 19) : '-';
+        }
+
+        function toggleSidebar(side) {
+            sidebarCollapsed[side] = !sidebarCollapsed[side];
+            applySidebarState();
+        }
+
+        function applySidebarState() {
+            document.getElementById('pendingPanel').classList.toggle('collapsed', sidebarCollapsed.pending);
+            document.getElementById('quotedPanel').classList.toggle('collapsed', sidebarCollapsed.quoted);
+            document.getElementById('reviewLayout').style.gridTemplateColumns =
+                (sidebarCollapsed.pending ? '44px' : '320px') + ' minmax(0, 1fr) ' + (sidebarCollapsed.quoted ? '44px' : '320px');
         }
 
         async function loadHistory() {
@@ -144,6 +186,8 @@
             renderList('quotedList', quotedItems, document.getElementById('quotedSearch').value, 'quoted');
             document.getElementById('pendingCount').textContent = pendingItems.length;
             document.getElementById('quotedCount').textContent = quotedItems.length;
+            document.getElementById('pendingCollapsedCount').textContent = pendingItems.length;
+            document.getElementById('quotedCollapsedCount').textContent = quotedItems.length;
         }
 
         function renderList(elementId, items, keyword, status) {
@@ -276,7 +320,7 @@
 
         async function calculateGlue() {
             if (!selectedCode) return;
-            if (!confirm('确认重新计算 C 开头胶料、外购物料的单价、材料金额，以及绝缘/外被制程费用吗？')) return;
+            if (!confirm('确认重新计算 C 开头胶料、外购物料的单价、材料金额，以及绝缘/外被/倒线/集合制程费用吗？')) return;
             document.getElementById('calcParamStatus').textContent = '胶料/外购计算中...';
             const res = await fetch('/api/v1/etl/quotation/calculate/glue?code=' + encodeURIComponent(selectedCode), {
                 method: 'POST',
@@ -287,7 +331,7 @@
                 document.getElementById('calcParamStatus').textContent = '';
                 return alert('胶料/外购计算失败：' + (data.detail || '未知错误'));
             }
-            document.getElementById('calcParamStatus').textContent = '已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行';
+            document.getElementById('calcParamStatus').textContent = '已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，色母 ' + (data.color_masterbatch_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行，倒线制程 ' + (data.rewind_process_calculated || 0) + ' 行，集合制程 ' + (data.collection_process_calculated || 0) + ' 行';
             await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
         }
 
@@ -311,19 +355,32 @@
 
         async function calculatePriceSummary() {
             if (!selectedCode) return;
-            if (!confirm('确认根据当前材料成本、费用和税率重新计算成本、取利售价、不取利售价、最终售价吗？')) return;
-            document.getElementById('calcParamStatus').textContent = '售价计算中...';
-            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary?code=' + encodeURIComponent(selectedCode), {
+            if (!confirm('确认按当前全部逻辑一键计算最终售价吗？系统会依次计算导体/编织、胶料/外购、制程费用和最终售价。')) return;
+            document.getElementById('calcParamStatus').textContent = '最终售价计算中...';
+            const res = await fetch('/api/v1/etl/quotation/calculate/full-price?code=' + encodeURIComponent(selectedCode), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
             });
             const data = await res.json();
             if (!res.ok) {
                 document.getElementById('calcParamStatus').textContent = '';
-                return alert('售价计算失败：' + (data.detail || '未知错误'));
+                return alert('一键计算失败：' + (data.detail || '未知错误'));
             }
-            document.getElementById('calcParamStatus').textContent = '售价已计算';
+            const statusText = buildFullPriceStatus(data);
             await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            document.getElementById('calcParamStatus').textContent = statusText;
+        }
+
+        function buildFullPriceStatus(data) {
+            const conductor = data.conductor || {};
+            const glue = data.glue || {};
+            const price = data.price_summary || {};
+            return '最终售价已计算：导体/编织 ' + (conductor.calculated || 0) +
+                ' 行，胶料 ' + (glue.c_calculated || 0) +
+                ' 行，外购 ' + (glue.external_calculated || 0) +
+                ' 行，色母 ' + (glue.color_masterbatch_calculated || 0) +
+                ' 行，手填兜底 ' + (glue.manual_material_calculated || 0) +
+                ' 行，最终售价 ' + (price.final_selling_price || '-');
         }
 
         async function showPriceSummaryTraces() {
