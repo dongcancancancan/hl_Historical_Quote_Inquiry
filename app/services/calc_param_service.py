@@ -36,12 +36,12 @@ def get_or_create_calc_params(db: Session, quotation: QuotationMain, operator: s
 def update_calc_params(db: Session, quotation: QuotationMain, data: dict, operator: str) -> QuotationCalcParam:
     params = get_or_create_calc_params(db, quotation, operator)
     params.quotation_code = quotation.quotation_code or params.quotation_code
-    params.copper_price = _optional_decimal(data.get("copper_price"), "铜价")
+    params.copper_price = _optional_positive_decimal(data.get("copper_price"), "铜价")
     params.copper_rod_process_fee = _required_decimal(
         data.get("copper_rod_process_fee", DEFAULT_COPPER_ROD_PROCESS_FEE),
         "铜杆加工费",
     )
-    params.vat_rate = _required_decimal(data.get("vat_rate", DEFAULT_VAT_RATE), "增值税率")
+    params.vat_rate = _required_positive_decimal(data.get("vat_rate", DEFAULT_VAT_RATE), "增值税率")
     params.updater = operator
     params.update_time = datetime.now()
     db.commit()
@@ -65,6 +65,19 @@ def _optional_decimal(value, label: str):
     return _required_decimal(value, label)
 
 
+def _optional_positive_decimal(value, label: str):
+    if value in (None, ""):
+        return None
+    return _required_positive_decimal(value, label)
+
+
+def _required_positive_decimal(value, label: str) -> Decimal:
+    result = _required_decimal(value, label)
+    if result <= 0:
+        raise ValueError(f"{label}必须大于 0")
+    return result
+
+
 def _required_decimal(value, label: str) -> Decimal:
     try:
         result = Decimal(str(value))
@@ -79,4 +92,3 @@ def _decimal_text(value) -> str | None:
     if value is None:
         return None
     return f"{Decimal(value):f}".rstrip("0").rstrip(".") or "0"
-

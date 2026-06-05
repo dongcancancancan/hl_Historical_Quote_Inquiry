@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>已报价历史</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-screen overflow-hidden bg-gray-100 font-sans text-gray-800">
+    <header class="flex h-14 items-center justify-between border-b bg-white px-5 shadow-sm">
+        <div>
+            <h1 class="text-base font-semibold">已报价历史</h1>
+            <p class="text-xs text-gray-400">查看已完成报价的成本分析表</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="/static/review.html" class="text-sm text-blue-600 hover:text-blue-800">返回待报价工作台</a>
+            <a href="/static/review-batch.html" class="text-sm text-blue-600 hover:text-blue-800">批量操作</a>
+            <button class="text-xs text-gray-400 hover:text-red-500" onclick="logout()">退出</button>
+        </div>
+    </header>
+
+    <main class="grid h-[calc(100vh-56px)] gap-3 p-3" style="grid-template-columns: 360px minmax(0, 1fr);">
+        <aside class="flex min-h-0 flex-col border bg-white shadow-sm">
+            <div class="border-b p-3">
+                <div class="flex items-center justify-between gap-2">
+                    <h2 class="text-sm font-semibold text-green-700">已报价</h2>
+                    <span id="quotedCount" class="text-xs text-gray-400">0</span>
+                </div>
+                <input id="quotedSearch" class="mt-2 w-full border px-2 py-1.5 text-xs outline-none focus:border-green-400" placeholder="搜索成本分析号/BPM..." oninput="renderList()">
+            </div>
+            <div id="quotedList" class="flex-1 overflow-y-auto p-2"></div>
+        </aside>
+
+        <section class="flex min-h-0 min-w-0 flex-col border bg-white shadow-sm">
+            <div class="flex h-14 items-center justify-between border-b px-4">
+                <div>
+                    <h2 id="sheetTitle" class="text-sm font-semibold">选择已报价记录查看</h2>
+                    <p id="sheetStatus" class="text-xs text-gray-400"></p>
+                </div>
+                <button id="exportBtn" class="hidden text-sm text-blue-600 hover:text-blue-800" onclick="exportExcel()">导出 Excel</button>
+            </div>
+            <div id="emptyState" class="flex flex-1 items-center justify-center text-sm text-gray-400">从左侧选择一条已报价记录</div>
+            <div id="sheetLoading" class="hidden flex flex-1 items-center justify-center text-sm text-gray-400">正在加载数据库内容...</div>
+            <iframe id="sheetFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="已报价成本分析表"></iframe>
+        </section>
+    </main>
+
+    <script>
+        const token = sessionStorage.getItem('token');
+        if (!token) window.location.href = '/static/login.html';
+        if (sessionStorage.getItem('role') !== 'reviewer') window.location.href = '/static/index.html';
+
+        let quotedItems = [];
+        let selectedCode = '';
+
+        function logout() {
+            sessionStorage.clear();
+            window.location.href = '/static/login.html';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        function formatUploadTime(value) {
+            return value ? value.replace('T', ' ').substring(0, 19) : '-';
+        }
+
+        async function loadHistory() {
+            const res = await fetch('/api/v1/etl/review/history', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '加载失败');
+            quotedItems = data.quoted || [];
+            renderList();
+        }
+
+        function renderList() {
+            const kw = (document.getElementById('quotedSearch').value || '').trim().toUpperCase();
+            const filtered = quotedItems.filter(item =>
+                ((item.quotation_code || '') + ' ' + (item.bpm_no || '') + ' ' + (item.product_spec || '')).toUpperCase().includes(kw)
+            );
+            document.getElementById('quotedCount').textContent = quotedItems.length;
+            const list = document.getElementById('quotedList');
+            if (!filtered.length) {
+                list.innerHTML = '<div class="py-4 text-center text-xs text-gray-400">暂无已报价记录</div>';
+                return;
+            }
+            list.innerHTML = filtered.map(item => {
+                const active = item.quotation_code === selectedCode ? ' border-green-400 bg-green-50' : ' border-gray-200 hover:bg-gray-50';
+                return '<button class="mb-2 w-full border p-2 text-left' + active + '" onclick="selectQuotation(\'' +
+                    encodeURIComponent(item.quotation_code) + '\')">' +
+                    '<span class="block truncate font-mono text-xs text-gray-800">' + escapeHtml(item.quotation_code) + '</span>' +
+                    '<span class="mt-1 block truncate font-mono text-xs text-blue-500">' + escapeHtml(item.bpm_no || '-') + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">' + escapeHtml((item.customer_name || '') + ' ' + (item.product_spec || '')) + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">上传人：' + escapeHtml(item.upload_user) + '</span>' +
+                    '<span class="mt-1 block font-mono text-xs text-gray-500">上传时间：' + escapeHtml(formatUploadTime(item.create_time)) + '</span>' +
+                '</button>';
+            }).join('');
+        }
+
+        async function selectQuotation(encodedCode) {
+            selectedCode = decodeURIComponent(encodedCode);
+            renderList();
+            document.getElementById('emptyState').classList.add('hidden');
+            document.getElementById('sheetFrame').classList.add('hidden');
+            document.getElementById('sheetLoading').classList.remove('hidden');
+            document.getElementById('sheetLoading').textContent = '正在加载数据库内容...';
+            document.getElementById('sheetTitle').textContent = selectedCode;
+            document.getElementById('sheetStatus').textContent = '已报价 · 只读';
+            document.getElementById('exportBtn').classList.remove('hidden');
+            try {
+                const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(selectedCode), {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) {
+                    const d = await res.json();
+                    throw new Error(d.detail || '加载失败');
+                }
+                document.getElementById('sheetFrame').srcdoc = await res.text();
+                document.getElementById('sheetLoading').classList.add('hidden');
+                document.getElementById('sheetFrame').classList.remove('hidden');
+            } catch (err) {
+                document.getElementById('sheetLoading').textContent = '加载失败：' + err.message;
+            }
+        }
+
+        async function exportExcel() {
+            if (!selectedCode) return;
+            const res = await fetch('/api/v1/etl/quotation/export?code=' + encodeURIComponent(selectedCode), {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            if (!res.ok) {
+                const d = await res.json();
+                return alert('导出失败：' + (d.detail || '未知错误'));
+            }
+            const url = URL.createObjectURL(await res.blob());
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = selectedCode + '.xlsx';
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        loadHistory().catch(err => alert('加载失败：' + err.message));
+    </script>
+</body>
+</html>

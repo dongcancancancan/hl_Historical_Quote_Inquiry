@@ -6,11 +6,18 @@ from sqlalchemy.orm import Session
 
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain
+from app.services.calculation_context import CalculationContext
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
 from app.services.quotation_summary_service import apply_quotation_summaries
 
 
-def calculate_price_summary(db: Session, quotation: QuotationMain, operator: str) -> dict:
+def calculate_price_summary(
+    db: Session,
+    quotation: QuotationMain,
+    operator: str,
+    ctx: CalculationContext | None = None,
+    commit: bool = True,
+) -> dict:
     if get_review_status(quotation) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能重新计算")
 
@@ -19,8 +26,12 @@ def calculate_price_summary(db: Session, quotation: QuotationMain, operator: str
     if net_profit_rate >= Decimal("1"):
         raise ValueError("净利率不能大于或等于 100%")
 
-    apply_quotation_summaries(quotation)
     materials = [item for item in quotation.materials if not item.deleted]
+    processes = [item for item in quotation.processes if not item.deleted]
+    if ctx:
+        _validate_current_calculation_context(materials, processes, ctx)
+
+    apply_quotation_summaries(quotation)
     calculated_unit_usage_sum = sum((_decimal(item.unit_usage) for item in materials), Decimal("0")) / Decimal("100")
     calculated_material_amount_sum = sum((_decimal(item.material_amount) for item in materials), Decimal("0"))
     total_fee = _decimal(quotation.total_fee)
@@ -160,7 +171,10 @@ def calculate_price_summary(db: Session, quotation: QuotationMain, operator: str
         operator,
     )
 
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {
         "cost": _decimal_text(cost),
         "profit_selling_price": _decimal_text(profit_selling_price),
@@ -193,6 +207,72 @@ def list_price_summary_traces(db: Session, quotation: QuotationMain) -> list[dic
         }
         for row in rows
     ]
+
+
+def _validate_current_calculation_context(materials, processes, ctx: CalculationContext):
+    missing_materials = [
+        item for item in materials
+        if not _is_blank_material_row(item) and item.id not in ctx.calculated_material_ids
+    ]
+    missing_processes = [
+        item for item in processes
+        if not _is_blank_process_row(item) and item.id not in ctx.calculated_process_ids
+    ]
+    messages = []
+    if missing_materials:
+        messages.append(
+            "以下材料行未完成本次计算，旧材料金额不会参与最终售价："
+            + _join_row_labels(missing_materials, _material_label)
+        )
+    if missing_processes:
+        messages.append(
+            "以下制程费用行未完成本次计算，旧费用小计不会参与最终售价："
+            + _join_row_labels(missing_processes, _process_label)
+        )
+    if messages:
+        raise ValueError("；".join(messages) + "。请维护价格/公式，或手填单价后重新一键计算")
+
+
+def _join_row_labels(rows, labeler, limit: int = 8) -> str:
+    labels = [labeler(row) for row in rows[:limit]]
+    if len(rows) > limit:
+        labels.append(f"等 {len(rows)} 行")
+    return "、".join(labels)
+
+
+def _material_label(item) -> str:
+    name = item.process_name or "物料"
+    code = item.process_code or item.spec_detail or "-"
+    seq = item.seq_no or "-"
+    return f"{seq}.{name}（{code}）"
+
+
+def _process_label(item) -> str:
+    return item.process_name or f"制程费用ID {item.id}"
+
+
+def _is_blank_material_row(item) -> bool:
+    text_empty = not any(str(value or "").strip() for value in (item.process_name, item.spec_detail, item.process_code))
+    numbers_empty = all(_decimal(value) == 0 for value in (item.unit_usage, item.unit_price, item.material_amount))
+    return text_empty and numbers_empty
+
+
+def _is_blank_process_row(item) -> bool:
+    text_empty = not str(item.process_name or "").strip()
+    numbers_empty = all(
+        _decimal(value) == 0
+        for value in (
+            item.std_hours,
+            item.loss_hours,
+            item.fixed_rate,
+            item.fixed_fee,
+            item.startup_loss_wire,
+            item.total_waste_glue,
+            item.amount,
+            item.subtotal_fee,
+        )
+    )
+    return text_empty and numbers_empty
 
 
 def _add_trace(db, quotation, field_name, formula, input_data, process_text, result_value, operator):

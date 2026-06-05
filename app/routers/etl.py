@@ -15,6 +15,7 @@ from app.core.auth import UserContext, get_current_user
 from app.models.quotation import QuotationMain
 from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
 from app.services.excel_preview_service import (
+    clear_material_unit_prices,
     get_accessible_quotation,
     get_review_history,
     get_review_status,
@@ -28,6 +29,8 @@ from app.services.copper_scenario_service import calculate_bpm_copper_scenarios
 from app.services.glue_calc_service import calculate_glue_materials, list_glue_traces
 from app.services.price_summary_calc_service import calculate_price_summary, list_price_summary_traces
 from app.services.full_price_calc_service import calculate_full_price
+from app.services.calculation_skill_engine import list_calculation_skills
+from app.services.calculation_diagnosis_service import diagnose_calculation
 from app.services.excel_service import render_quotation_excel
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,10 @@ class BatchDeleteRequest(BaseModel):
 
 class CopperScenarioRequest(BaseModel):
     bpm_no: str
+
+
+class CalculationDiagnosisRequest(BaseModel):
+    error_message: str | None = None
 
 
 def _quotation_codes_by_bpm(db: Session, bpm_no: str) -> list[str]:
@@ -460,6 +467,30 @@ def calculate_quotation_full_price(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.get("/quotation/calculate/skills")
+def get_calculation_skills(
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看计算 Skill")
+    return {"items": list_calculation_skills()}
+
+
+@router.post("/quotation/calculate/diagnose")
+async def diagnose_quotation_calculation(
+    code: str,
+    req: CalculationDiagnosisRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行计算诊断")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限查看")
+    return await diagnose_calculation(db, quotation, req.error_message)
+
+
 @router.get("/quotation/calculate/price-summary/traces")
 def get_quotation_price_summary_traces(
     code: str,
@@ -500,6 +531,29 @@ def update_quotation(
         db.rollback()
         logger.exception("Quotation update failed for %s", code)
         raise HTTPException(status_code=500, detail="成本分析表更新失败")
+
+
+@router.patch("/quotation/unit-prices/clear")
+def clear_quotation_unit_prices(
+    code: str,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以清空单价")
+    quotation = get_accessible_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, user.is_reviewer)
+    if not quotation:
+        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限修改")
+    try:
+        result = clear_material_unit_prices(db, quotation, user.display_name)
+        return {"ok": True, **result}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        logger.exception("Clear quotation unit prices failed for %s", code)
+        raise HTTPException(status_code=500, detail="清空单价失败")
 
 
 @router.patch("/quotation/review-status")

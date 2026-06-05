@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
-from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
+from app.models.quotation import QuotationFieldOverride, QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.models.user import User
 from app.services.quotation_summary_service import apply_quotation_summaries
 from app.services.unit_price_override_service import (
@@ -197,9 +197,16 @@ def update_quotation_fields(
         if entity == "material" and field == "unit_price":
             if raw_value is None or str(raw_value).strip() == "":
                 disable_unit_price_override(db, quotation.id, record_id, updater)
+                target.unit_price = None
+                target.material_amount = None
             else:
                 value = _parse_update_value(raw_value, field_type)
-                upsert_unit_price_override(db, quotation, record_id, value, target.unit_price, updater)
+                if value <= 0:
+                    disable_unit_price_override(db, quotation.id, record_id, updater)
+                    target.unit_price = None
+                    target.material_amount = None
+                else:
+                    upsert_unit_price_override(db, quotation, record_id, value, target.unit_price, updater)
             target.updater = updater
             target.update_time = now
             continue
@@ -224,6 +231,48 @@ def update_quotation_fields(
     apply_quotation_summaries(quotation, materials.values(), processes.values(), updater, now)
     db.commit()
     return quotation.quotation_code
+
+
+def clear_material_unit_prices(db: Session, quotation: QuotationMain, updater: str) -> dict:
+    if get_review_status(quotation) == REVIEW_QUOTED:
+        raise ValueError("该成本分析表已报价，只能查看，不能修改")
+
+    now = datetime.now()
+    materials = [item for item in quotation.materials if not item.deleted]
+    disabled_overrides = (
+        db.query(QuotationFieldOverride)
+        .filter(
+            QuotationFieldOverride.quotation_main_id == quotation.id,
+            QuotationFieldOverride.entity_type == "material",
+            QuotationFieldOverride.field_name == "unit_price",
+            QuotationFieldOverride.enabled == True,
+        )
+        .update(
+            {
+                "enabled": False,
+                "updater": updater,
+                "update_time": now,
+            },
+            synchronize_session=False,
+        )
+    )
+
+    cleared = 0
+    for item in materials:
+        if item.unit_price is not None or item.material_amount is not None:
+            cleared += 1
+        item.unit_price = None
+        item.material_amount = None
+        item.updater = updater
+        item.update_time = now
+
+    apply_quotation_summaries(quotation, materials, quotation.processes, updater, now)
+    db.commit()
+    return {
+        "quotation_code": quotation.quotation_code or "",
+        "cleared": cleared,
+        "disabled_overrides": disabled_overrides,
+    }
 
 
 def _load_tags(raw_tags: str | None) -> dict:

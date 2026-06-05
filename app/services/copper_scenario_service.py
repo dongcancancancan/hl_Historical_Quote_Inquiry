@@ -9,7 +9,7 @@ from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFA
 from app.services.conductor_calc_service import (
     _is_conductor_row,
     _match_copper_fee,
-    _match_process_fee_row,
+    _match_process_fee_rows,
     _parse_copper_code,
 )
 from app.services.excel_preview_service import get_review_status
@@ -129,8 +129,7 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
         material_amount = _round4(_decimal(item.unit_usage) * unit_price)
         material_amounts[item.id] = material_amount
 
-        process = _match_process_fee_row(quotation, item, used_process_ids)
-        if process:
+        for process in _match_process_fee_rows(quotation, item, used_process_ids):
             used_process_ids.add(process.id)
             process_amount = _round4(_decimal(process.startup_loss_wire) * material_amount)
             process_subtotals[process.id] = _round4(

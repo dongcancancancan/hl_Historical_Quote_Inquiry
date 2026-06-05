@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial
+from app.services.calculation_context import CalculationContext
 from app.services.conductor_calc_service import _is_conductor_row
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
 from app.services.unit_price_override_service import apply_unit_price_overrides, has_unit_price_override, load_unit_price_overrides
@@ -17,7 +18,13 @@ PVC_CODE_RE = re.compile(r"\b(C[A-Z0-9*]{3,})\b", re.IGNORECASE)
 GLUE_CALC_TYPES = ["glue", "external_material", "manual_material", "insulation", "jacket", "rewind", "collection"]
 
 
-def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: str) -> dict:
+def calculate_glue_materials(
+    db: Session,
+    quotation: QuotationMain,
+    operator: str,
+    ctx: CalculationContext | None = None,
+    commit: bool = True,
+) -> dict:
     if get_review_status(quotation) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能重新计算")
     unit_price_overrides = load_unit_price_overrides(db, quotation.id)
@@ -61,7 +68,7 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
     for item in candidates:
         material_calculated = False
         if has_unit_price_override(item, unit_price_overrides):
-            manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
+            manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now, ctx)
             if manual_ok:
                 manual_material_calculated += 1
                 if _is_color_masterbatch_row(item):
@@ -76,82 +83,66 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
         elif _is_color_masterbatch_row(item):
             ok = False
             if _external_material_code(item):
-                ok = _calculate_external_material(db, quotation, item, operator, now)
+                ok = _calculate_external_material(db, quotation, item, operator, now, ctx=ctx)
                 if ok:
                     external_calculated += 1
                     color_masterbatch_calculated += 1
                     material_calculated = True
             if not ok:
-                manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
-                if manual_ok:
-                    manual_material_calculated += 1
-                    color_masterbatch_calculated += 1
-                    material_calculated = True
-                else:
-                    skipped.append({
-                        "id": item.id,
-                        "reason": _missing_color_masterbatch_price_message(item),
-                    })
-                    continue
+                skipped.append({
+                    "id": item.id,
+                    "reason": _missing_color_masterbatch_price_message(item),
+                })
+                continue
         elif _has_c_code(item):
-            ok = _calculate_c_material(db, quotation, item, operator, now)
+            ok = _calculate_c_material(db, quotation, item, operator, now, ctx)
             if ok:
                 c_calculated += 1
                 material_calculated = True
             else:
-                ok = _calculate_external_material(db, quotation, item, operator, now, allow_c_code=True)
+                ok = _calculate_external_material(db, quotation, item, operator, now, allow_c_code=True, ctx=ctx)
                 if ok:
                     external_calculated += 1
                     material_calculated = True
                 else:
-                    manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
-                    if manual_ok:
-                        manual_material_calculated += 1
-                        material_calculated = True
-                    else:
-                        skipped.append({"id": item.id, "reason": _missing_pvc_and_external_price_message(item)})
-                        continue
+                    skipped.append({"id": item.id, "reason": _missing_pvc_and_external_price_message(item)})
+                    continue
         elif _external_material_code(item):
-            ok = _calculate_external_material(db, quotation, item, operator, now)
+            ok = _calculate_external_material(db, quotation, item, operator, now, ctx=ctx)
             if ok:
                 external_calculated += 1
                 material_calculated = True
             else:
-                manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
-                if manual_ok:
-                    manual_material_calculated += 1
-                    material_calculated = True
-                else:
-                    skipped.append({
-                        "id": item.id,
-                        "reason": _missing_external_price_message(item),
-                    })
-                    continue
+                skipped.append({
+                    "id": item.id,
+                    "reason": _missing_external_price_message(item),
+                })
+                continue
         if material_calculated:
             calculated += 1
         if _is_insulation_row(item):
-            ok, error = _calculate_insulation_process_fee(db, quotation, item, operator, now)
+            ok, error = _calculate_insulation_process_fee(db, quotation, item, operator, now, ctx)
             if ok:
                 insulation_process_calculated += 1
             elif error:
                 hard_errors.append(error)
 
     for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row)]:
-        ok, error = _calculate_jacket_process_fee(db, quotation, item, operator, now)
+        ok, error = _calculate_jacket_process_fee(db, quotation, item, operator, now, ctx)
         if ok:
             jacket_process_calculated += 1
         elif error:
             hard_errors.append(error)
 
     for process in rewind_processes:
-        ok, error = _calculate_rewind_process_fee(db, quotation, process, operator, now)
+        ok, error = _calculate_rewind_process_fee(db, quotation, process, operator, now, ctx)
         if ok:
             rewind_process_calculated += 1
         elif error:
             hard_errors.append(error)
 
     for process in collection_processes:
-        ok, error = _calculate_collection_process_fee(db, quotation, process, operator, now)
+        ok, error = _calculate_collection_process_fee(db, quotation, process, operator, now, ctx)
         if ok:
             collection_process_calculated += 1
         elif error:
@@ -174,7 +165,10 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
 
     _recalculate_material_summary(quotation, operator, now)
     _recalculate_process_summary(quotation, operator, now)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {
         "calculated": calculated,
         "c_calculated": c_calculated,
@@ -217,7 +211,14 @@ def list_glue_traces(db: Session, quotation: QuotationMain) -> list[dict]:
     ]
 
 
-def _calculate_c_material(db: Session, quotation: QuotationMain, item: QuotationMaterial, operator: str, now: datetime) -> bool:
+def _calculate_c_material(
+    db: Session,
+    quotation: QuotationMain,
+    item: QuotationMaterial,
+    operator: str,
+    now: datetime,
+    ctx: CalculationContext | None = None,
+) -> bool:
     lookup = _resolve_pvc_bom(db, item)
     if not lookup:
         return False
@@ -228,6 +229,8 @@ def _calculate_c_material(db: Session, quotation: QuotationMain, item: Quotation
     item.material_amount = material_amount
     item.updater = operator
     item.update_time = now
+    if ctx:
+        ctx.mark_material(item.id, "pvc_bom")
 
     input_data = {
         "material_id": item.id,
@@ -237,10 +240,16 @@ def _calculate_c_material(db: Session, quotation: QuotationMain, item: Quotation
         "resolved_bom_no": lookup["bom_no"],
         "source_text": lookup["source_text"],
         "source": "PVC_BOM_Main.saleprice",
+        "match_mode": lookup.get("match_mode", "exact"),
+        "lookup_pattern": lookup.get("lookup_pattern"),
         "saleprice": str(lookup["saleprice"]),
         "unit_usage": str(item.unit_usage or 0),
     }
+    match_text = ""
+    if lookup.get("match_mode") == "wildcard_highest":
+        match_text = f"按通配料号 {lookup.get('lookup_pattern')} 模糊匹配并取最高售价。\n"
     process_text = (
+        f"{match_text}"
         f"从 {lookup['source_text']} 解析并匹配到 PVC 母料 {lookup['bom_no']}，该母料售价 = {lookup['saleprice']}。\n"
         f"胶料单价 = PVC 母料售价 = {unit_price}\n"
         f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
@@ -257,6 +266,7 @@ def _calculate_external_material(
     operator: str,
     now: datetime,
     allow_c_code: bool = False,
+    ctx: CalculationContext | None = None,
 ) -> bool:
     material_code = _external_material_code(item, allow_c_code=allow_c_code)
     if not material_code:
@@ -271,6 +281,8 @@ def _calculate_external_material(
     item.material_amount = material_amount
     item.updater = operator
     item.update_time = now
+    if ctx:
+        ctx.mark_material(item.id, "external_material")
 
     adjust_date = lookup["adjust_date"].isoformat() if lookup["adjust_date"] else ""
     input_data = {
@@ -281,13 +293,19 @@ def _calculate_external_material(
         "material_code": material_code,
         "source_view": "HL_QS.dbo.v_qs_bzcb",
         "price_field": "单位标准成本",
+        "match_mode": lookup.get("match_mode", "exact"),
+        "lookup_pattern": lookup.get("lookup_pattern"),
         "adjust_date": adjust_date,
         "unit": lookup["unit"],
         "unit_standard_cost": str(lookup["unit_standard_cost"]),
         "material_description": lookup["material_description"],
         "unit_usage": str(item.unit_usage or 0),
     }
+    match_text = ""
+    if lookup.get("match_mode") == "wildcard_highest":
+        match_text = f"按通配料号 {lookup.get('lookup_pattern')} 模糊匹配到 {lookup['material_code']}，并取最高单位标准成本。\n"
     process_text = (
+        f"{match_text}"
         f"物料编号 {material_code} 命中 HL_QS.dbo.v_qs_bzcb，最新调整日期 {adjust_date or '-'}，"
         f"单位标准成本 {lookup['unit_standard_cost']}，作为单价。\n"
         f"外购物料单价 = 单位标准成本 = {unit_price}\n"
@@ -320,68 +338,53 @@ def _calculate_external_material(
     return True
 
 
-def _calculate_manual_price_material(db: Session, quotation: QuotationMain, item: QuotationMaterial, operator: str, now: datetime) -> bool:
+def _calculate_manual_price_material(
+    db: Session,
+    quotation: QuotationMain,
+    item: QuotationMaterial,
+    operator: str,
+    now: datetime,
+    ctx: CalculationContext | None = None,
+) -> bool:
     unit_price = Decimal(item.unit_price or 0)
-    material_amount = Decimal(item.material_amount or 0)
     material_code = _external_material_code(item, allow_c_code=True) or item.process_code or item.spec_detail or ""
-    if unit_price <= 0 and material_amount <= 0:
+    if unit_price <= 0:
         return False
 
-    source = ""
-    if unit_price > 0:
-        material_amount = _round4(Decimal(item.unit_usage or 0) * unit_price)
-        item.material_amount = material_amount
-        source = "手填单价"
-    else:
-        source = "手填材料金额"
-
+    material_amount = _round4(Decimal(item.unit_usage or 0) * unit_price)
+    item.material_amount = material_amount
     item.updater = operator
     item.update_time = now
+    if ctx:
+        ctx.mark_material(item.id, "manual_unit_price")
 
     input_data = {
         "material_id": item.id,
         "process_name": item.process_name,
         "spec_detail": item.spec_detail,
         "process_code": item.process_code,
-        "source": source,
+        "source": "手填单价",
         "unit_usage": str(item.unit_usage or 0),
         "unit_price": str(unit_price),
         "material_amount": str(material_amount),
         "missing_external_price": material_code,
     }
-    if unit_price > 0:
-        process_text = (
-            f"物料编号 {material_code} 未在价格源命中，使用审价人员手填单价 {unit_price}。\n"
-            f"材料金额 = BOM用量 {item.unit_usage or 0} × 手填单价 {unit_price} = {material_amount}"
-        )
-        _add_trace(
-            db,
-            quotation,
-            item,
-            "material_amount",
-            "材料金额 = BOM用量 × 手填单价",
-            input_data,
-            process_text,
-            material_amount,
-            operator,
-            "manual_material",
-        )
-    else:
-        process_text = (
-            f"物料编号 {material_code} 未在价格源命中，使用审价人员手填材料金额 {material_amount} 继续后续计算。"
-        )
-        _add_trace(
-            db,
-            quotation,
-            item,
-            "material_amount",
-            "材料金额 = 手填材料金额",
-            input_data,
-            process_text,
-            material_amount,
-            operator,
-            "manual_material",
-        )
+    process_text = (
+        f"物料编号 {material_code} 未在价格源命中，使用审价人员手填单价 {unit_price}。\n"
+        f"材料金额 = BOM用量 {item.unit_usage or 0} × 手填单价 {unit_price} = {material_amount}"
+    )
+    _add_trace(
+        db,
+        quotation,
+        item,
+        "material_amount",
+        "材料金额 = BOM用量 × 手填单价",
+        input_data,
+        process_text,
+        material_amount,
+        operator,
+        "manual_material",
+    )
     return True
 
 
@@ -391,12 +394,13 @@ def _calculate_insulation_process_fee(
     item: QuotationMaterial,
     operator: str,
     now: datetime,
+    ctx: CalculationContext | None = None,
 ) -> tuple[bool, str]:
     process = _match_insulation_process_fee_row(quotation, item)
     if not process:
         return False, f"未找到绝缘/芯押对应的制程费用行：{item.process_name or ''}"
 
-    conductor_amount = _conductor_material_amount_before(quotation, item)
+    conductor_amount = _conductor_material_amount_before(quotation, item, ctx)
     if conductor_amount <= 0:
         return False, "绝缘制程计算需要先计算导体/铜绞材料金额"
 
@@ -416,6 +420,8 @@ def _calculate_insulation_process_fee(
     process.subtotal_fee = subtotal_fee
     process.updater = operator
     process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "insulation")
 
     input_data = {
         "material_id": item.id,
@@ -468,12 +474,13 @@ def _calculate_jacket_process_fee(
     item: QuotationMaterial,
     operator: str,
     now: datetime,
+    ctx: CalculationContext | None = None,
 ) -> tuple[bool, str]:
     process = _match_jacket_process_fee_row(quotation, item)
     if not process:
         return False, f"未找到外被对应的制程费用行：{item.process_name or ''}"
 
-    material_amount_sum = _material_amount_sum(quotation)
+    material_amount_sum = _material_amount_sum(quotation, ctx)
     if material_amount_sum <= 0:
         return False, "外被制程计算需要先计算材料金额总和"
 
@@ -496,6 +503,8 @@ def _calculate_jacket_process_fee(
     process.subtotal_fee = subtotal_fee
     process.updater = operator
     process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "jacket")
 
     input_data = {
         "material_id": item.id,
@@ -549,8 +558,9 @@ def _calculate_rewind_process_fee(
     process,
     operator: str,
     now: datetime,
+    ctx: CalculationContext | None = None,
 ) -> tuple[bool, str]:
-    material_amount_sum = _material_amount_sum(quotation)
+    material_amount_sum = _material_amount_sum(quotation, ctx)
     if material_amount_sum <= 0:
         return False, "倒线制程计算需要先计算材料金额总和"
 
@@ -565,6 +575,8 @@ def _calculate_rewind_process_fee(
     process.subtotal_fee = subtotal_fee
     process.updater = operator
     process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "rewind")
 
     input_data = {
         "process_fee_id": process.id,
@@ -613,8 +625,9 @@ def _calculate_collection_process_fee(
     process,
     operator: str,
     now: datetime,
+    ctx: CalculationContext | None = None,
 ) -> tuple[bool, str]:
-    amounts = _collection_material_amounts(quotation)
+    amounts = _collection_material_amounts(quotation, ctx)
     if amounts["copper_amount"] <= 0:
         return False, _missing_collection_amount_message(quotation, "铜绞", _is_core_conductor_row)
     if amounts["core_press_amount"] <= 0:
@@ -634,6 +647,8 @@ def _calculate_collection_process_fee(
     process.subtotal_fee = subtotal_fee
     process.updater = operator
     process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "collection")
 
     input_data = {
         "process_fee_id": process.id,
@@ -694,11 +709,35 @@ def _resolve_pvc_bom(db: Session, item: QuotationMaterial) -> dict | None:
                 WHERE BOM_NO = :bom_no AND saleprice IS NOT NULL
             """), {"bom_no": normalized}).mappings().first()
             if row:
-                return {"bom_no": row["BOM_NO"], "saleprice": Decimal(row["saleprice"]), "source_text": source_text}
+                return {
+                    "bom_no": row["BOM_NO"],
+                    "saleprice": Decimal(row["saleprice"]),
+                    "source_text": source_text,
+                    "match_mode": "exact",
+                    "lookup_pattern": normalized,
+                }
+        wildcard_pattern = _wildcard_like_pattern(code)
+        if wildcard_pattern:
+            row = db.execute(text("""
+                SELECT TOP 1 BOM_NO, saleprice
+                FROM dbo.PVC_BOM_Main
+                WHERE UPPER(BOM_NO) LIKE :pattern ESCAPE '\\'
+                  AND saleprice IS NOT NULL
+                ORDER BY saleprice DESC, BOM_NO
+            """), {"pattern": wildcard_pattern}).mappings().first()
+            if row:
+                return {
+                    "bom_no": row["BOM_NO"],
+                    "saleprice": Decimal(row["saleprice"]),
+                    "source_text": source_text,
+                    "match_mode": "wildcard_highest",
+                    "lookup_pattern": wildcard_pattern,
+                }
     return None
 
 
 def _resolve_external_material_price(db: Session, material_code: str) -> dict | None:
+    normalized_code = str(material_code or "").strip().upper()
     row = db.execute(text("""
         SELECT TOP 1
             [物料编号],
@@ -710,7 +749,26 @@ def _resolve_external_material_price(db: Session, material_code: str) -> dict | 
         WHERE UPPER([物料编号]) = :material_code
           AND [单位标准成本] IS NOT NULL
         ORDER BY [调整日期] DESC
-    """), {"material_code": material_code.upper()}).mappings().first()
+    """), {"material_code": normalized_code}).mappings().first()
+    match_mode = "exact"
+    lookup_pattern = normalized_code
+    if not row:
+        wildcard_pattern = _wildcard_like_pattern(normalized_code)
+        if wildcard_pattern:
+            row = db.execute(text("""
+                SELECT TOP 1
+                    [物料编号],
+                    [物料描述],
+                    [单位],
+                    [调整日期],
+                    [单位标准成本]
+                FROM [HL_QS].[dbo].[v_qs_bzcb]
+                WHERE UPPER([物料编号]) LIKE :pattern ESCAPE '\\'
+                  AND [单位标准成本] IS NOT NULL
+                ORDER BY [单位标准成本] DESC, [调整日期] DESC, [物料编号]
+            """), {"pattern": wildcard_pattern}).mappings().first()
+            match_mode = "wildcard_highest"
+            lookup_pattern = wildcard_pattern
     if not row:
         return None
     return {
@@ -719,6 +777,8 @@ def _resolve_external_material_price(db: Session, material_code: str) -> dict | 
         "unit": row["单位"] or "",
         "adjust_date": row["调整日期"],
         "unit_standard_cost": Decimal(row["单位标准成本"]),
+        "match_mode": match_mode,
+        "lookup_pattern": lookup_pattern,
     }
 
 
@@ -733,9 +793,27 @@ def _candidate_codes(item: QuotationMaterial):
 def _normalize_code_candidates(code: str) -> list[str]:
     cleaned = str(code or "").strip().upper().replace(" ", "")
     candidates = [cleaned]
-    if "*" in cleaned:
-        candidates.append(cleaned.replace("*", "0"))
     return list(dict.fromkeys(item for item in candidates if item.startswith("C")))
+
+
+def _wildcard_like_pattern(code: str) -> str:
+    cleaned = str(code or "").strip().upper().replace(" ", "")
+    if "*" not in cleaned:
+        return ""
+    chars = []
+    previous_wildcard = False
+    for char in cleaned:
+        if char == "*":
+            if not previous_wildcard:
+                chars.append("%")
+            previous_wildcard = True
+            continue
+        previous_wildcard = False
+        if char in {"\\", "%", "_"}:
+            chars.append("\\" + char)
+        else:
+            chars.append(char)
+    return "".join(chars)
 
 
 def _external_material_code(item: QuotationMaterial, allow_c_code: bool = False) -> str:
@@ -752,13 +830,13 @@ def _external_material_code(item: QuotationMaterial, allow_c_code: bool = False)
 def _missing_external_price_message(item: QuotationMaterial) -> str:
     code = item.process_code or item.spec_detail or ""
     process = item.process_name or "物料"
-    return f"{process}（料号：{code}）未在外购价格视图 v_qs_bzcb 查到单价；请维护外购价格，或在表格中手填单价/材料金额后保存再计算"
+    return f"{process}（料号：{code}）未在外购价格视图 v_qs_bzcb 查到单价；请维护外购价格，或在表格中手填单价后保存再计算"
 
 
 def _missing_color_masterbatch_price_message(item: QuotationMaterial) -> str:
     code = str(item.process_code or "").strip()
     if not code:
-        return "色母物料编码为空；请填写物料编码，或手填单价/材料金额后保存再计算"
+        return "色母物料编码为空；请填写物料编码，或手填单价后保存再计算"
     return _missing_external_price_message(item)
 
 
@@ -767,7 +845,7 @@ def _missing_pvc_and_external_price_message(item: QuotationMaterial) -> str:
     process = item.process_name or "物料"
     return (
         f"{process}（料号：{code}）未在 PVC 母料 BOM 和外购价格视图 v_qs_bzcb 中查到单价；"
-        "请维护内部 BOM/外购价格，或在表格中手填单价/材料金额后保存再计算"
+        "请维护内部 BOM/外购价格，或在表格中手填单价后保存再计算"
     )
 
 
@@ -854,46 +932,64 @@ def _normalize_process_name(value) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
 
 
-def _conductor_material_amount_before(quotation: QuotationMain, insulation_item: QuotationMaterial) -> Decimal:
+def _conductor_material_amount_before(
+    quotation: QuotationMain,
+    insulation_item: QuotationMaterial,
+    ctx: CalculationContext | None = None,
+) -> Decimal:
     insulation_seq = insulation_item.seq_no or 0
     candidates = [
         item for item in quotation.materials
         if not item.deleted
         and item.id != insulation_item.id
+        and (ctx is None or item.id in ctx.calculated_material_ids)
         and _is_core_conductor_row(item)
         and (not insulation_seq or not item.seq_no or item.seq_no < insulation_seq)
     ]
     if not candidates:
         candidates = [
             item for item in quotation.materials
-            if not item.deleted and item.id != insulation_item.id and _is_core_conductor_row(item)
+            if not item.deleted
+            and item.id != insulation_item.id
+            and (ctx is None or item.id in ctx.calculated_material_ids)
+            and _is_core_conductor_row(item)
         ]
     return _round4(sum(Decimal(item.material_amount or 0) for item in candidates))
 
 
-def _material_amount_sum(quotation: QuotationMain) -> Decimal:
+def _material_amount_sum(quotation: QuotationMain, ctx: CalculationContext | None = None) -> Decimal:
     return _round4(sum(
         Decimal(item.material_amount or 0)
         for item in quotation.materials
         if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
     ))
 
 
-def _collection_material_amounts(quotation: QuotationMain) -> dict[str, Decimal]:
+def _collection_material_amounts(
+    quotation: QuotationMain,
+    ctx: CalculationContext | None = None,
+) -> dict[str, Decimal]:
     copper_amount = _round4(sum(
         Decimal(item.material_amount or 0)
         for item in quotation.materials
-        if not item.deleted and _is_core_conductor_row(item)
+        if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
+        and _is_core_conductor_row(item)
     ))
     core_press_amount = _round4(sum(
         Decimal(item.material_amount or 0)
         for item in quotation.materials
-        if not item.deleted and _is_insulation_row(item)
+        if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
+        and _is_insulation_row(item)
     ))
     core_twist_amount = _round4(sum(
         Decimal(item.material_amount or 0)
         for item in quotation.materials
-        if not item.deleted and _is_core_twist_row(item)
+        if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
+        and _is_core_twist_row(item)
     ))
     return {
         "copper_amount": copper_amount,
@@ -911,7 +1007,7 @@ def _missing_collection_amount_message(quotation: QuotationMain, label: str, mat
         f"{item.process_name or label}（料号：{item.process_code or item.spec_detail or '-'}，材料金额：{_decimal_text(item.material_amount)}）"
         for item in rows
     )
-    return f"集合制程计算需要先计算{label}材料金额；当前{details}。请先计算对应单价，或手填单价/材料金额后保存再计算"
+    return f"集合制程计算需要先计算{label}材料金额；当前{details}。请先计算对应单价，或手填单价后保存再计算"
 
 
 def _add_trace(db, quotation, item, field_name, formula, input_data, process_text, result_value, operator, calc_type: str):
