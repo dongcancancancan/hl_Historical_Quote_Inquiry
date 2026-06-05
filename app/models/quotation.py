@@ -151,3 +151,22 @@ class QuotationCostSummary(Base):
     price_with_profit = Column(Numeric(18, 8), comment="取利售价 (RMB/M)")
     price_without_profit = Column(Numeric(18, 8), comment="不取利售价 (RMB/M)")
     final_price = Column(Numeric(18, 8), comment="最终售价 (RMB/M)")
+
+
+class QuotationFieldOverride(Base):
+    """审价手工覆盖值，目前仅用于材料单价参与计算。"""
+    __tablename__ = "quotation_field_override"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    quotation_main_id = Column(Integer, ForeignKey("quotation_main.id"), nullable=False, index=True)
+    entity_type = Column(String(20), nullable=False, index=True)
+    record_id = Column(Integer, nullable=False, index=True)
+    field_name = Column(String(50), nullable=False, index=True)
+    value_numeric = Column(Numeric(18, 4), comment="覆盖数值")
+    base_value_numeric = Column(Numeric(18, 4), comment="覆盖前平台原值")
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    remark = Column(String(500), comment="覆盖说明")
+    creator = Column(String(64), comment="创建人")
+    create_time = Column(DateTime, nullable=False, server_default=func.now(), comment="创建时间")
+    updater = Column(String(64), comment="更新人")
+    update_time = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now(), comment="更新时间")

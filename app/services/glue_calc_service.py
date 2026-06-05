@@ -10,6 +10,7 @@ from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial
 from app.services.conductor_calc_service import _is_conductor_row
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
+from app.services.unit_price_override_service import apply_unit_price_overrides, has_unit_price_override, load_unit_price_overrides
 
 
 PVC_CODE_RE = re.compile(r"\b(C[A-Z0-9*]{3,})\b", re.IGNORECASE)
@@ -19,12 +20,20 @@ GLUE_CALC_TYPES = ["glue", "external_material", "manual_material", "insulation",
 def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: str) -> dict:
     if get_review_status(quotation) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能重新计算")
+    unit_price_overrides = load_unit_price_overrides(db, quotation.id)
+    apply_unit_price_overrides(quotation, unit_price_overrides)
 
     candidates = [
         item for item in quotation.materials
         if not item.deleted
         and not _is_conductor_row(item)
-        and (_has_c_code(item) or _external_material_code(item) or _is_jacket_row(item) or _is_color_masterbatch_row(item))
+        and (
+            _has_c_code(item)
+            or _external_material_code(item)
+            or _is_jacket_row(item)
+            or _is_color_masterbatch_row(item)
+            or item.id in unit_price_overrides
+        )
     ]
     rewind_processes = [item for item in quotation.processes if not item.deleted and _is_rewind_process(item)]
     collection_processes = [item for item in quotation.processes if not item.deleted and _is_collection_process(item)]
@@ -51,7 +60,20 @@ def calculate_glue_materials(db: Session, quotation: QuotationMain, operator: st
 
     for item in candidates:
         material_calculated = False
-        if _is_color_masterbatch_row(item):
+        if has_unit_price_override(item, unit_price_overrides):
+            manual_ok = _calculate_manual_price_material(db, quotation, item, operator, now)
+            if manual_ok:
+                manual_material_calculated += 1
+                if _is_color_masterbatch_row(item):
+                    color_masterbatch_calculated += 1
+                material_calculated = True
+            else:
+                skipped.append({
+                    "id": item.id,
+                    "reason": f"{item.process_name or '物料'}已设置手工单价但单价为空或无效",
+                })
+                continue
+        elif _is_color_masterbatch_row(item):
             ok = False
             if _external_material_code(item):
                 ok = _calculate_external_material(db, quotation, item, operator, now)

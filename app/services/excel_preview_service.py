@@ -8,6 +8,12 @@ from sqlalchemy.orm import Session
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.models.user import User
 from app.services.quotation_summary_service import apply_quotation_summaries
+from app.services.unit_price_override_service import (
+    apply_unit_price_overrides,
+    disable_unit_price_override,
+    load_unit_price_overrides,
+    upsert_unit_price_override,
+)
 
 
 MAIN_FIELDS = {
@@ -188,6 +194,15 @@ def update_quotation_fields(
         field_type = field_types.get(field)
         if not field_type:
             raise ValueError(f"字段 {field} 不允许修改")
+        if entity == "material" and field == "unit_price":
+            if raw_value is None or str(raw_value).strip() == "":
+                disable_unit_price_override(db, quotation.id, record_id, updater)
+            else:
+                value = _parse_update_value(raw_value, field_type)
+                upsert_unit_price_override(db, quotation, record_id, value, target.unit_price, updater)
+            target.updater = updater
+            target.update_time = now
+            continue
         value = _parse_update_value(raw_value, field_type)
 
         if entity == "main" and field == "quotation_code":
@@ -247,6 +262,14 @@ def _parse_update_value(raw_value, field_type: str):
 
 def render_quotation_preview(quotation: QuotationMain) -> str:
     """Render a cost-analysis worksheet from structured database fields only."""
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        unit_price_overrides = load_unit_price_overrides(db, quotation.id)
+    finally:
+        db.close()
+    apply_unit_price_overrides(quotation, unit_price_overrides)
     apply_quotation_summaries(quotation)
     materials = sorted(
         (item for item in quotation.materials if not item.deleted),
@@ -267,7 +290,7 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
             _edit_cell(item.spec_detail, "material", item.id, "spec_detail", colspan=3, css="left"),
             _edit_cell(item.process_code, "material", item.id, "process_code"),
             _edit_cell(item.unit_usage, "material", item.id, "unit_usage", css="number"),
-            _edit_cell(item.unit_price, "material", item.id, "unit_price", css="number"),
+            _edit_cell(item.unit_price, "material", item.id, "unit_price", css="number", locked=item.id in unit_price_overrides),
             _edit_cell(item.material_amount, "material", item.id, "material_amount", css="number"),
         )
         for item in materials
@@ -421,14 +444,17 @@ def _cell(value="", colspan: int = 1, rowspan: int = 1, css: str = "") -> str:
     return f"<td{span}{classes}>{html.escape(_format_value(value))}</td>"
 
 
-def _edit_cell(value, entity: str, record_id: int, field: str, colspan: int = 1, css: str = "", scale: str = "") -> str:
+def _edit_cell(value, entity: str, record_id: int, field: str, colspan: int = 1, css: str = "", scale: str = "", locked: bool = False) -> str:
     span = f' colspan="{colspan}"' if colspan > 1 else ""
+    css = f"{css} locked-cell".strip() if locked else css
     classes = f' class="{css}"' if css else ""
+    locked_flag = "1" if locked else "0"
     attrs = (
         f'data-entity="{entity}" data-id="{record_id}" data-field="{field}" '
-        f'data-scale="{scale}" value="{html.escape(_format_value(value), quote=True)}"'
+        f'data-scale="{scale}" data-locked="{locked_flag}" value="{html.escape(_format_value(value), quote=True)}"'
     )
-    return f'<td{span}{classes}><input class="sheet-input" {attrs} disabled></td>'
+    marker = '<span class="lock-mark" title="手工单价">手</span>' if locked else ""
+    return f'<td{span}{classes}><div class="cell-wrap"><input class="sheet-input" {attrs} disabled>{marker}</div></td>'
 
 
 def _format_value(value) -> str:
@@ -491,6 +517,9 @@ def _wrap_preview_html(quotation_code: str, table_html: str) -> str:
         .alert {{ color: #ef0000; }}
         .sheet-input {{ width: 100%; box-sizing: border-box; padding: 1px 2px; border: 1px solid transparent; outline: none; background: transparent; color: inherit; font: inherit; text-align: inherit; }}
         .sheet-input:not(:disabled) {{ border-color: #2563eb; background: #fff; }}
+        .cell-wrap {{ position: relative; display: flex; align-items: center; }}
+        .locked-cell {{ background: #dbeafe !important; }}
+        .lock-mark {{ position: absolute; right: 2px; top: 1px; color: #1d4ed8; font-size: 10px; font-family: Arial, sans-serif; }}
     </style>
 </head>
 <body>

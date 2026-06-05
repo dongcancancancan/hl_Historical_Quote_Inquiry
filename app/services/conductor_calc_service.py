@@ -10,6 +10,7 @@ from app.models.calc_param import QuotationCalcParam
 from app.models.copper_fee import CopperProcessingFee
 from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.services.excel_preview_service import get_review_status, REVIEW_QUOTED
+from app.services.unit_price_override_service import apply_unit_price_overrides, has_unit_price_override, load_unit_price_overrides
 
 
 COPPER_CODE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(BC|TC)", re.IGNORECASE)
@@ -19,13 +20,8 @@ DIAMETER_TOLERANCE = Decimal("0.002")
 def calculate_conductor_materials(db: Session, quotation: QuotationMain, operator: str) -> dict:
     if get_review_status(quotation) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能重新计算")
-    params = (
-        db.query(QuotationCalcParam)
-        .filter(QuotationCalcParam.quotation_main_id == quotation.id)
-        .first()
-    )
-    if not params or params.copper_price is None:
-        raise ValueError("请先填写并保存铜价")
+    unit_price_overrides = load_unit_price_overrides(db, quotation.id)
+    apply_unit_price_overrides(quotation, unit_price_overrides)
 
     conductor_rows = [
         item for item in quotation.materials
@@ -33,6 +29,15 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
     ]
     if not conductor_rows:
         raise ValueError("未找到导体/编织类制程行")
+
+    platform_price_rows = [item for item in conductor_rows if not has_unit_price_override(item, unit_price_overrides)]
+    params = (
+        db.query(QuotationCalcParam)
+        .filter(QuotationCalcParam.quotation_main_id == quotation.id)
+        .first()
+    )
+    if platform_price_rows and (not params or params.copper_price is None):
+        raise ValueError("请先填写并保存铜价，或为导体/编织行手填单价")
 
     calculated = 0
     process_calculated = 0
@@ -45,23 +50,38 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
     ).delete(synchronize_session=False)
 
     for item in conductor_rows:
-        parsed = _parse_copper_code(item)
-        if not parsed:
-            skipped.append({"id": item.id, "reason": "未从物料编码或规格中解析到 BC/TC 线径"})
-            continue
-        fee = _match_copper_fee(db, parsed["copper_type"], parsed["diameter"])
-        if not fee:
-            skipped.append({"id": item.id, "reason": f"铜加工费未维护：{parsed['diameter']}{parsed['copper_type']}"})
-            continue
+        is_manual_unit_price = has_unit_price_override(item, unit_price_overrides)
+        parsed = None
+        fee = None
+        copper_price = None
+        rod_fee = None
+        vat_rate = None
+        wire_fee = None
 
-        copper_price = Decimal(params.copper_price)
-        rod_fee = Decimal(params.copper_rod_process_fee)
-        vat_rate = Decimal(params.vat_rate)
-        wire_fee = Decimal(fee.processing_fee)
-        unit_price = _round4((copper_price + rod_fee) / Decimal("1000") / vat_rate + wire_fee)
+        if is_manual_unit_price:
+            unit_price = Decimal(item.unit_price or 0)
+            if unit_price <= 0:
+                skipped.append({"id": item.id, "reason": f"{item.process_name or '导体/编织'}已设置手工单价但单价为空或无效"})
+                continue
+        else:
+            parsed = _parse_copper_code(item)
+            if not parsed:
+                skipped.append({"id": item.id, "reason": "未从物料编码或规格中解析到 BC/TC 线径，可手填单价后重新计算"})
+                continue
+            fee = _match_copper_fee(db, parsed["copper_type"], parsed["diameter"])
+            if not fee:
+                skipped.append({"id": item.id, "reason": f"铜加工费未维护：{parsed['diameter']}{parsed['copper_type']}，可手填单价后重新计算"})
+                continue
+
+            copper_price = Decimal(params.copper_price)
+            rod_fee = Decimal(params.copper_rod_process_fee)
+            vat_rate = Decimal(params.vat_rate)
+            wire_fee = Decimal(fee.processing_fee)
+            unit_price = _round4((copper_price + rod_fee) / Decimal("1000") / vat_rate + wire_fee)
         material_amount = _round4(Decimal(item.unit_usage or 0) * unit_price)
 
-        item.unit_price = unit_price
+        if not is_manual_unit_price:
+            item.unit_price = unit_price
         item.material_amount = material_amount
         item.updater = operator
         item.update_time = now
@@ -72,23 +92,31 @@ def calculate_conductor_materials(db: Session, quotation: QuotationMain, operato
             "process_name": item.process_name,
             "spec_detail": item.spec_detail,
             "process_code": item.process_code,
-            "parsed_diameter": str(parsed["diameter"]),
-            "parsed_copper_type": parsed["copper_type"],
-            "matched_diameter": str(fee.diameter),
-            "matched_copper_type": fee.copper_type,
-            "copper_price": str(copper_price),
-            "copper_rod_process_fee": str(rod_fee),
-            "vat_rate": str(vat_rate),
-            "wire_processing_fee": str(wire_fee),
+            "parsed_diameter": str(parsed["diameter"]) if parsed else None,
+            "parsed_copper_type": parsed["copper_type"] if parsed else None,
+            "matched_diameter": str(fee.diameter) if fee else None,
+            "matched_copper_type": fee.copper_type if fee else None,
+            "copper_price": str(copper_price) if copper_price is not None else None,
+            "copper_rod_process_fee": str(rod_fee) if rod_fee is not None else None,
+            "vat_rate": str(vat_rate) if vat_rate is not None else None,
+            "wire_processing_fee": str(wire_fee) if wire_fee is not None else None,
             "unit_usage": str(item.unit_usage or 0),
+            "unit_price_source": "手工单价" if is_manual_unit_price else "平台计算",
         }
-        formula = "导体/编织单价 = (铜价 + 铜杆加工费) / 1000 / 增值税率 + 铜加工费"
-        process_text = (
-            f"从 {parsed['source_field']} 解析到 {parsed['diameter']}{parsed['copper_type']}；"
-            f"铜加工费匹配 {fee.diameter}{fee.copper_type} = {wire_fee} 元/KG。\n"
-            f"导体/编织单价 = ({copper_price} + {rod_fee}) / 1000 / {vat_rate} + {wire_fee} = {unit_price}\n"
-            f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
-        )
+        if is_manual_unit_price:
+            formula = "导体/编织单价 = 审价人员手填单价"
+            process_text = (
+                f"使用审价人员手填单价 {unit_price}，不覆盖数据库原始单价。\n"
+                f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
+            )
+        else:
+            formula = "导体/编织单价 = (铜价 + 铜杆加工费) / 1000 / 增值税率 + 铜加工费"
+            process_text = (
+                f"从 {parsed['source_field']} 解析到 {parsed['diameter']}{parsed['copper_type']}；"
+                f"铜加工费匹配 {fee.diameter}{fee.copper_type} = {wire_fee} 元/KG。\n"
+                f"导体/编织单价 = ({copper_price} + {rod_fee}) / 1000 / {vat_rate} + {wire_fee} = {unit_price}\n"
+                f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
+            )
         _add_trace(db, quotation, item, "unit_price", formula, input_data, process_text, unit_price, operator)
         _add_trace(
             db,
