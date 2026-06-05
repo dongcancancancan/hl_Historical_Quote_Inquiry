@@ -8,7 +8,6 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.auth import UserContext, get_current_user
@@ -32,6 +31,13 @@ from app.services.full_price_calc_service import calculate_full_price
 from app.services.calculation_skill_engine import list_calculation_skills
 from app.services.calculation_diagnosis_service import diagnose_calculation
 from app.services.excel_service import render_quotation_excel
+from app.services.bpm_lookup_service import (
+    build_quotation_code_filter,
+    get_bpm_flows_by_quotation_codes,
+    get_quotation_codes_by_bpm,
+    normalize_bpm_no,
+    resolve_bpm_no,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,19 +83,6 @@ class CopperScenarioRequest(BaseModel):
 
 class CalculationDiagnosisRequest(BaseModel):
     error_message: str | None = None
-
-
-def _quotation_codes_by_bpm(db: Session, bpm_no: str) -> list[str]:
-    bpm_no = (bpm_no or "").strip().upper()
-    if not bpm_no:
-        return []
-    rows = db.execute(text("""
-        SELECT DISTINCT [成本分析号] AS quotation_code
-        FROM [HL_QS].[dbo].[BPM_B015_List]
-        WHERE UPPER([流水号]) = :bpm_no
-          AND [成本分析号] IS NOT NULL
-    """), {"bpm_no": bpm_no}).mappings().all()
-    return [str(row["quotation_code"]).strip() for row in rows if str(row["quotation_code"] or "").strip()]
 
 
 @router.post("/upload_excel")
@@ -174,9 +167,11 @@ async def upload_and_process_excel(
 def upload_history(
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
+    search: str = "",
 ):
-    """返回报价单明细（按日期分组）。管理员可查看所有，普通用户仅看自己的。"""
-    history = get_upload_history(db, user.tenant_id, user.display_name, user.is_admin)
+    """返回报价单明细（按日期分组）。管理员可查看所有，普通用户仅看自己的。
+    支持 search 参数：按成本分析号模糊搜索或按 BPM 流程号精确搜索。"""
+    history = get_upload_history(db, user.tenant_id, user.display_name, user.is_admin, search=search)
     return {"history": history}
 
 
@@ -184,11 +179,12 @@ def upload_history(
 def review_history(
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
+    search: str = "",
 ):
     """审价科工作台：返回全库待报价和已报价列表。"""
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看")
-    return get_review_history(db)
+    return get_review_history(db, search=search)
 
 
 @router.get("/quotations")
@@ -201,13 +197,19 @@ def list_quotations(
     if not user.is_reviewer and not user.is_admin:
         raise HTTPException(status_code=403, detail="无权查看批量报价列表")
     query = db.query(QuotationMain).filter(QuotationMain.deleted == False)
+    bpm_code = ""
+    codes: list[str] = []
     if bpm_no:
-        bpm_code = bpm_no.strip().upper()
-        codes = _quotation_codes_by_bpm(db, bpm_code)
+        bpm_code = normalize_bpm_no(bpm_no)
+        codes = get_quotation_codes_by_bpm(db, bpm_code)
         if not codes:
             return {"items": [], "bpm_no": bpm_code, "mapped_codes": []}
-        query = query.filter(QuotationMain.quotation_code.in_(codes))
+        query = query.filter(build_quotation_code_filter(QuotationMain.quotation_code, codes))
     rows = query.order_by(QuotationMain.create_time.desc()).limit(1000).all()
+    bpm_map = get_bpm_flows_by_quotation_codes(
+        db,
+        [quotation.quotation_code for quotation in rows if quotation.quotation_code],
+    )
     items = []
     for quotation in rows:
         review_status = get_review_status(quotation)
@@ -215,7 +217,7 @@ def list_quotations(
             continue
         items.append({
             "quotation_code": quotation.quotation_code or "",
-            "bpm_no": bpm_no.strip().upper() if bpm_no else (quotation.bpm_no or ""),
+            "bpm_no": bpm_code if bpm_no else resolve_bpm_no(bpm_map, quotation.quotation_code, quotation.bpm_no),
             "customer_name": quotation.customer_name or "",
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",
@@ -223,7 +225,7 @@ def list_quotations(
             "review_status": review_status,
             "final_selling_price": str(quotation.final_selling_price or ""),
         })
-    return {"items": items, "bpm_no": bpm_no.strip().upper() if bpm_no else "", "mapped_codes": codes if bpm_no else []}
+    return {"items": items, "bpm_no": bpm_code, "mapped_codes": codes if bpm_no else []}
 
 
 @router.delete("/quotation")

@@ -36,9 +36,9 @@
             <div class="bg-white rounded-lg shadow-md p-4 sticky top-16">
                 <div class="flex items-center justify-between mb-3">
                     <h2 class="text-sm font-semibold text-gray-700">上传历史</h2>
-                    <button class="text-xs text-blue-600 hover:underline" onclick="loadHistory()">刷新</button>
+                    <button class="text-xs text-blue-600 hover:underline" onclick="loadHistory((document.getElementById('historySearch').value || '').trim())">刷新</button>
                 </div>
-                <input type="text" id="historySearch" placeholder="搜索成本分析号..."
+                <input type="text" id="historySearch" placeholder="搜索成本分析号 / BPM流程号..."
                     class="w-full text-xs px-3 py-1.5 border rounded mb-3 focus:outline-none focus:ring-1 focus:ring-blue-400"
                     oninput="filterHistory()">
                 <div id="historyList" class="space-y-2 max-h-[calc(100vh-220px)] overflow-y-auto">
@@ -173,10 +173,16 @@
         // ============ 上传历史 ============
         let historyData = [];  // 缓存原始数据用于搜索过滤
 
-        async function loadHistory() {
+        let searchDebounceTimer = null;
+
+        async function loadHistory(search) {
             const list = document.getElementById('historyList');
             try {
-                const res = await fetch('/api/v1/etl/history', {
+                let url = '/api/v1/etl/history';
+                if (search) {
+                    url += '?search=' + encodeURIComponent(search);
+                }
+                const res = await fetch(url, {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 const data = await res.json();
@@ -193,14 +199,11 @@
         }
 
         function filterHistory() {
-            const keyword = (document.getElementById('historySearch').value || '').trim().toUpperCase();
-            if (!keyword) { renderHistory(historyData); return; }
-            const filtered = [];
-            for (const group of historyData) {
-                const items = group.items.filter(it => ((it.quotation_code || '') + ' ' + (it.bpm_no || '')).toUpperCase().includes(keyword));
-                if (items.length > 0) filtered.push({ date: group.date, items: items });
-            }
-            renderHistory(filtered);
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(function () {
+                const keyword = (document.getElementById('historySearch').value || '').trim();
+                loadHistory(keyword);
+            }, 300);
         }
 
         function renderHistory(groups) {
@@ -245,12 +248,9 @@
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '删除失败'); }
-                // 从缓存中移除
-                for (const group of historyData) {
-                    group.items = group.items.filter(it => it.quotation_code !== code);
-                }
-                historyData = historyData.filter(g => g.items.length > 0);
-                filterHistory(); // 重新渲染（保留搜索关键词）
+                // 重新加载历史（保留搜索关键词）
+                const keyword = (document.getElementById('historySearch').value || '').trim();
+                loadHistory(keyword);
                 showDeleteToast(code);
             } catch (err) {
                 alert('删除失败: ' + err.message);

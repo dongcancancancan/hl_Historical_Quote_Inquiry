@@ -14,6 +14,12 @@ from app.services.unit_price_override_service import (
     load_unit_price_overrides,
     upsert_unit_price_override,
 )
+from app.services.bpm_lookup_service import (
+    build_quotation_code_filter,
+    get_bpm_flows_by_quotation_codes,
+    get_quotation_codes_by_bpm,
+    resolve_bpm_no,
+)
 
 
 MAIN_FIELDS = {
@@ -132,20 +138,33 @@ def set_review_status(db: Session, quotation: QuotationMain, status: str, update
     return status
 
 
-def get_review_history(db: Session, limit: int = 1000) -> dict[str, list[dict]]:
+def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict[str, list[dict]]:
+    search = (search or "").strip()
+    filters = [QuotationMain.deleted == False]
+    if search:
+        workflow_codes = get_quotation_codes_by_bpm(db, search)
+        if workflow_codes:
+            filters.append(build_quotation_code_filter(QuotationMain.quotation_code, workflow_codes))
+        else:
+            filters.append(QuotationMain.quotation_code.contains(search))
+
     quotations = (
         db.query(QuotationMain)
-        .filter(QuotationMain.deleted == False)
+        .filter(*filters)
         .order_by(QuotationMain.create_time.desc())
         .limit(limit)
         .all()
+    )
+    bpm_map = get_bpm_flows_by_quotation_codes(
+        db,
+        [quotation.quotation_code for quotation in quotations if quotation.quotation_code],
     )
     history = {REVIEW_PENDING: [], REVIEW_QUOTED: []}
     for quotation in quotations:
         status = get_review_status(quotation)
         history[status].append({
             "quotation_code": quotation.quotation_code,
-            "bpm_no": quotation.bpm_no or "",
+            "bpm_no": resolve_bpm_no(bpm_map, quotation.quotation_code, quotation.bpm_no),
             "customer_name": quotation.customer_name or "",
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",

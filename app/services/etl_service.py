@@ -884,9 +884,25 @@ async def process_excel_streaming(
             logger.warning(f"Cancelled {cancelled_count} pending LLM tasks due to disconnect")
 
 
-def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin: bool = False, limit: int = 500):
-    """查询报价单明细（按日期分组），管理员可查看所有"""
+def get_upload_history(
+    db: Session,
+    tenant_id: str,
+    creator_name: str,
+    is_admin: bool = False,
+    limit: int = 500,
+    search: str = "",
+):
+    """查询报价单明细（按日期分组），管理员可查看所有。
+    支持按成本分析号或 BPM 流程号搜索。"""
     from sqlalchemy import func, Date, or_
+    from app.services.bpm_lookup_service import (
+        build_quotation_code_filter,
+        get_bpm_flows_by_quotation_codes,
+        get_quotation_codes_by_bpm,
+        resolve_bpm_no,
+    )
+
+    search = (search or "").strip()
 
     filters = [
         QuotationMain.deleted == False,
@@ -896,6 +912,16 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
         admin_names = _admin_creator_names(db, tenant_id)
         if admin_names:
             filters.append(QuotationMain.creator.notin_(admin_names))
+
+    # 搜索：先尝试匹配 BPM 流程号，再按成本分析号模糊匹配
+    if search:
+        workflow_codes = get_quotation_codes_by_bpm(db, search)
+        if workflow_codes:
+            # 按流程号搜索：返回流程下全部成本分析号
+            filters.append(build_quotation_code_filter(QuotationMain.quotation_code, workflow_codes))
+        else:
+            # 按成本分析号模糊搜索
+            filters.append(QuotationMain.quotation_code.contains(search))
 
     rows = (
         db.query(
@@ -915,6 +941,16 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
         .all()
     )
 
+    # 批量查 BPM 流程号映射
+    all_codes = [row[0] for row in rows if row[0]]
+    bpm_map = get_bpm_flows_by_quotation_codes(db, all_codes)
+    if all_codes:
+        logger.info(
+            "[BPM_LOOKUP] %s quotation codes queried, %s matched from BPM_B015_List",
+            len(all_codes),
+            len(bpm_map),
+        )
+
     # 按日期分组
     from collections import OrderedDict
     groups = OrderedDict()
@@ -926,9 +962,11 @@ def get_upload_history(db: Session, tenant_id: str, creator_name: str, is_admin:
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
+        # 优先用 BPM_B015_List 查到的流程号，其次用 quotation_main 存储的
+        resolved_bpm = resolve_bpm_no(bpm_map, code, bpm_no)
         groups[date_key].append({
             "quotation_code": code,
-            "bpm_no": bpm_no or "",
+            "bpm_no": resolved_bpm,
             "customer_name": customer or "",
             "product_spec": spec or "",
             "upload_user": creator or "",
