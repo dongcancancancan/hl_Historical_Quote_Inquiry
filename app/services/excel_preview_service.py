@@ -3,6 +3,7 @@ import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.quotation import QuotationFieldOverride, QuotationMain, QuotationMaterial, QuotationProcessFee
@@ -14,18 +15,13 @@ from app.services.unit_price_override_service import (
     load_unit_price_overrides,
     upsert_unit_price_override,
 )
-from app.services.bpm_lookup_service import (
-    build_quotation_code_filter,
-    get_bpm_flows_by_quotation_codes,
-    get_quotation_codes_by_bpm,
-    resolve_bpm_no,
-)
 
 
 MAIN_FIELDS = {
     "quotation_code": "text",
     "customer_name": "text",
     "customer_address": "text",
+    "package_method": "text",
     "analysis_date": "date",
     "structure": "text",
     "braiding_rate": "percent",
@@ -53,6 +49,7 @@ MAIN_FIELDS = {
     "profit_selling_price": "decimal",
     "non_profit_price": "decimal",
     "final_selling_price": "decimal",
+    "remark": "text",
 }
 
 MATERIAL_FIELDS = {
@@ -142,11 +139,14 @@ def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict
     search = (search or "").strip()
     filters = [QuotationMain.deleted == False]
     if search:
-        workflow_codes = get_quotation_codes_by_bpm(db, search)
-        if workflow_codes:
-            filters.append(build_quotation_code_filter(QuotationMain.quotation_code, workflow_codes))
-        else:
-            filters.append(QuotationMain.quotation_code.contains(search))
+        filters.append(or_(
+            QuotationMain.quotation_code.contains(search),
+            QuotationMain.bpm_no.contains(search),
+            QuotationMain.customer_name.contains(search),
+            QuotationMain.customer_address.contains(search),
+            QuotationMain.package_method.contains(search),
+            QuotationMain.product_spec.contains(search),
+        ))
 
     quotations = (
         db.query(QuotationMain)
@@ -155,17 +155,14 @@ def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict
         .limit(limit)
         .all()
     )
-    bpm_map = get_bpm_flows_by_quotation_codes(
-        db,
-        [quotation.quotation_code for quotation in quotations if quotation.quotation_code],
-    )
     history = {REVIEW_PENDING: [], REVIEW_QUOTED: []}
     for quotation in quotations:
         status = get_review_status(quotation)
         history[status].append({
             "quotation_code": quotation.quotation_code,
-            "bpm_no": resolve_bpm_no(bpm_map, quotation.quotation_code, quotation.bpm_no),
+            "bpm_no": quotation.bpm_no or "",
             "customer_name": quotation.customer_name or "",
+            "package_method": getattr(quotation, "package_method", "") or "",
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",
             "create_time": quotation.create_time.isoformat() if quotation.create_time else None,
@@ -387,14 +384,16 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
         [
             _row(_cell("成 本 分 析 表", colspan=9, css="title")),
             _row(
-                _cell("", colspan=7),
+                _cell("", colspan=4),
+                _cell("包装方式-米数:", css="label"),
+                _edit_cell(getattr(quotation, "package_method", "") or "", "main", quotation.id, "package_method", colspan=2, css="value left"),
                 _cell("编号:", css="label"),
                 _edit_cell(quotation.quotation_code, "main", quotation.id, "quotation_code", css="value"),
             ),
             _row(
-                _cell("客户:", css="label"),
+                _cell("客户名称:", css="label"),
                 _edit_cell(quotation.customer_name, "main", quotation.id, "customer_name", colspan=3, css="value left"),
-                _cell("地址:", css="label"),
+                _cell("收货地（市）:", css="label"),
                 _edit_cell(quotation.customer_address, "main", quotation.id, "customer_address", css="value left"),
                 _cell("分析日期:", css="label"),
                 _edit_cell(quotation.analysis_date, "main", quotation.id, "analysis_date", colspan=2, css="value"),
@@ -495,6 +494,10 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
                 _edit_cell(_percent(quotation.monthly_interest), "main", quotation.id, "monthly_interest", css="fee-value number", scale="percent"),
                 _edit_cell(_percent(quotation.corporate_tax_rate), "main", quotation.id, "corporate_tax_rate", css="fee-value number", scale="percent"),
                 _cell("", colspan=2, css="price-value"),
+            ),
+            _row(
+                _cell("备注:", css="label"),
+                _edit_cell(quotation.remark, "main", quotation.id, "remark", colspan=8, css="value left"),
             ),
         ]
     )

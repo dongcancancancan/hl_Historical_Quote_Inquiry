@@ -41,9 +41,10 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 2. 从详细规格中提取出所有胶料料号（常见前缀: EX, EE, D, V, C, PA），存入 material_codes 数组。
 3. 将百分比转换为小数（如 2% 转换为 0.02）。如果本身是小数则保持不变。
 4. 表头区"结构"列的右侧紧跟"编织率(%)"列，提取编织率百分比值，转换为小数（如 95 → 0.95、85% → 0.85），存入 braiding_rate。如果该列为空，再尝试从品名规格中提取（如 "95%编织"）。
-5. 表头区"客户"列的右侧紧跟"地址"列（通常为"xx市"），存入 address。
-6. 核心表格中每一行制程的规格列之后紧跟"物料编码"列，将物料编码提取到该行 material 的 material_code 字段。物料编码可能是空值或"新开发"字样，均如实提取。
-7. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
+5. 新模板表头区包含 "客户名称"、"收货地（市）"、"包装方式-米数"、"备注" 等字段：客户名称存入 customer，收货地（市）存入 address，包装方式-米数存入 package_method，备注存入 remark。
+6. 旧模板中如果仍出现 "客户"、"地址"，按 customer/address 兼容提取。
+7. 核心表格中每一行制程的规格列之后紧跟"物料编码"列，将物料编码提取到该行 material 的 material_code 字段。物料编码可能是空值或"新开发"字样，均如实提取。
+8. 【非常重要】务必准确提取 "quotation_no" (编号)！在表头区，编号可能出现在 "编号:"、"编号：" 之后，或者孤立地出现在某一列（如 FHLR2GCB2G-50-003）。请仔细扫描【表头区数据】的所有列，不要遗漏。
 
 【表头区数据】
 {header_text}
@@ -55,11 +56,13 @@ EXTRACTION_PROMPT = """你是一个制造业电缆报价单数据提取专家。
 {{
     "quotation_no": "编号",
     "customer": "客户",
-    "address": "地址",
+    "address": "收货地（市）/地址",
+    "package_method": "包装方式-米数",
     "date_val": "分析日期 (YYYY-MM-DD)",
     "structure": "结构",
     "product_spec": "品名规格",
     "braiding_rate": 浮点数 (编织率，小数形式，如 0.95),
+    "remark": "备注",
     "material_codes": ["料号1", "料号2"],
     "materials": [
         {{
@@ -189,10 +192,12 @@ def _normalize_extraction_shape(data: dict) -> dict:
         "quotation_no",
         "customer",
         "address",
+        "package_method",
         "date_val",
         "structure",
         "product_spec",
         "braiding_rate",
+        "remark",
     ]
     for field in scalar_fields:
         if field in data:
@@ -252,6 +257,99 @@ def _compact_cell_text(val) -> str:
     if val is None:
         return ""
     return re.sub(r"\s+", "", str(val)).strip()
+
+
+def _patch_header_fields_from_excel(data: dict, file_path: str, block: QuotationBlock | None) -> dict:
+    """Patch header metadata from the uploaded workbook using template labels.
+
+    This keeps new-template fields deterministic and avoids depending only on LLM
+    interpretation for short labels such as "收货地（市）" and "包装方式-米数".
+    """
+    if not data or not file_path or not block:
+        return data
+
+    ext = os.path.splitext(file_path)[1].lower()
+    is_xls = ext == ".xls"
+    wb = None
+    try:
+        if is_xls:
+            import xlrd
+            wb = xlrd.open_workbook(file_path)
+            ws = wb.sheet_by_name(block.sheet_name)
+            max_row = ws.nrows
+            max_col = ws.ncols
+
+            def cell_value(row: int, col: int):
+                if row < 1 or col < 1 or row > max_row or col > max_col:
+                    return None
+                return ws.cell_value(row - 1, col - 1)
+        else:
+            wb = load_workbook(file_path, data_only=True)
+            ws = wb[block.sheet_name]
+            max_row = ws.max_row
+            max_col = ws.max_column
+
+            def cell_value(row: int, col: int):
+                if row < 1 or col < 1 or row > max_row or col > max_col:
+                    return None
+                return ws.cell(row=row, column=col).value
+
+        label_map = {
+            "quotation_no": ("编号",),
+            "customer": ("客户名称", "客户"),
+            "address": ("收货地（市）", "收货地(市)", "收货地", "地址"),
+            "package_method": ("包装方式-米数", "包装方式"),
+            "date_val": ("分析日期",),
+            "structure": ("结构",),
+            "braiding_rate": ("编织率",),
+            "product_spec": ("品名规格",),
+            "remark": ("备注",),
+        }
+
+        patched: dict[str, str] = {}
+        start_row = max(1, block.row_idx)
+        end_row = min(max_row, block.row_idx + 24)
+        for row in range(start_row, end_row + 1):
+            for col in range(1, max_col + 1):
+                label_text = _compact_cell_text(cell_value(row, col)).rstrip(":：")
+                if not label_text:
+                    continue
+                for field, labels in label_map.items():
+                    if field in patched:
+                        continue
+                    if not any(label in label_text for label in labels):
+                        continue
+                    value = _next_non_empty_cell_text(cell_value, row, col, max_col)
+                    if value:
+                        patched[field] = value
+
+        if patched:
+            for field, value in patched.items():
+                data[field] = value
+            logger.info(
+                "[%s] Excel structure patched header fields: %s",
+                data.get("quotation_no") or block.preview[:50],
+                ", ".join(sorted(patched.keys())),
+            )
+    except Exception as e:
+        logger.warning(
+            "[%s] Excel header patch skipped: %s",
+            data.get("quotation_no") if data else block.preview[:50],
+            e,
+        )
+    finally:
+        if wb is not None and not is_xls:
+            wb.close()
+
+    return data
+
+
+def _next_non_empty_cell_text(cell_value, row: int, label_col: int, max_col: int) -> str:
+    for col in range(label_col + 1, min(max_col, label_col + 4) + 1):
+        text_value = str(cell_value(row, col) or "").strip()
+        if text_value:
+            return text_value
+    return ""
 
 
 def _patch_cost_summary_from_excel(data: dict, file_path: str, block: QuotationBlock | None) -> dict:
@@ -632,6 +730,7 @@ def _write_one_quotation(
     extracted_tags = json.dumps({
         "material_codes": material_codes,
         "customer_keyword": (data.get("customer") or "").split()[0] if data.get("customer") else None,
+        "package_method": data.get("package_method") or "",
     }, ensure_ascii=False)
 
     new_main = QuotationMain(
@@ -640,9 +739,11 @@ def _write_one_quotation(
         bpm_no=bpm_no,
         customer_name=data.get("customer") or "",
         customer_address=data.get("address") or "",
+        package_method=data.get("package_method") or "",
         analysis_date=parsed_date,
         structure=data.get("structure") or "",
         product_spec=product_spec,
+        remark=data.get("remark") or "",
         original_file_path=saved_path,
         extracted_tags=extracted_tags,
         unit_usage_sum=None,
@@ -834,7 +935,8 @@ async def process_excel_streaming(
             if r["data"] is None or r.get("dup_skipped"):
                 continue
             try:
-                data = _patch_cost_summary_from_excel(r["data"], saved_path, r.get("block"))
+                data = _patch_header_fields_from_excel(r["data"], saved_path, r.get("block"))
+                data = _patch_cost_summary_from_excel(data, saved_path, r.get("block"))
                 code = _write_one_quotation(db, data, tenant_id, username, saved_path, display_name, bpm_no)
                 if code:
                     db_success += 1
@@ -895,12 +997,6 @@ def get_upload_history(
     """查询报价单明细（按日期分组），管理员可查看所有。
     支持按成本分析号或 BPM 流程号搜索。"""
     from sqlalchemy import func, Date, or_
-    from app.services.bpm_lookup_service import (
-        build_quotation_code_filter,
-        get_bpm_flows_by_quotation_codes,
-        get_quotation_codes_by_bpm,
-        resolve_bpm_no,
-    )
 
     search = (search or "").strip()
 
@@ -913,21 +1009,22 @@ def get_upload_history(
         if admin_names:
             filters.append(QuotationMain.creator.notin_(admin_names))
 
-    # 搜索：先尝试匹配 BPM 流程号，再按成本分析号模糊匹配
     if search:
-        workflow_codes = get_quotation_codes_by_bpm(db, search)
-        if workflow_codes:
-            # 按流程号搜索：返回流程下全部成本分析号
-            filters.append(build_quotation_code_filter(QuotationMain.quotation_code, workflow_codes))
-        else:
-            # 按成本分析号模糊搜索
-            filters.append(QuotationMain.quotation_code.contains(search))
+        filters.append(or_(
+            QuotationMain.quotation_code.contains(search),
+            QuotationMain.bpm_no.contains(search),
+            QuotationMain.customer_name.contains(search),
+            QuotationMain.customer_address.contains(search),
+            QuotationMain.package_method.contains(search),
+            QuotationMain.product_spec.contains(search),
+        ))
 
     rows = (
         db.query(
             QuotationMain.quotation_code,
             QuotationMain.bpm_no,
             QuotationMain.customer_name,
+            QuotationMain.package_method,
             QuotationMain.product_spec,
             QuotationMain.creator,
             func.cast(QuotationMain.create_time, Date).label("create_date"),
@@ -941,20 +1038,10 @@ def get_upload_history(
         .all()
     )
 
-    # 批量查 BPM 流程号映射
-    all_codes = [row[0] for row in rows if row[0]]
-    bpm_map = get_bpm_flows_by_quotation_codes(db, all_codes)
-    if all_codes:
-        logger.info(
-            "[BPM_LOOKUP] %s quotation codes queried, %s matched from BPM_B015_List",
-            len(all_codes),
-            len(bpm_map),
-        )
-
     # 按日期分组
     from collections import OrderedDict
     groups = OrderedDict()
-    for code, bpm_no, customer, spec, creator, create_date, create_time, path, extracted_tags in rows:
+    for code, bpm_no, customer, package_method, spec, creator, create_date, create_time, path, extracted_tags in rows:
         from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status_from_tags
         review_status = get_review_status_from_tags(extracted_tags)
         if review_status == REVIEW_QUOTED:
@@ -962,12 +1049,11 @@ def get_upload_history(
         date_key = str(create_date) if create_date else "未知日期"
         if date_key not in groups:
             groups[date_key] = []
-        # 优先用 BPM_B015_List 查到的流程号，其次用 quotation_main 存储的
-        resolved_bpm = resolve_bpm_no(bpm_map, code, bpm_no)
         groups[date_key].append({
             "quotation_code": code,
-            "bpm_no": resolved_bpm,
+            "bpm_no": bpm_no or "",
             "customer_name": customer or "",
+            "package_method": package_method or "",
             "product_spec": spec or "",
             "upload_user": creator or "",
             "create_time": create_time.isoformat() if create_time else None,
@@ -1045,6 +1131,7 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
             seen_codes.add(code)
 
             t1 = time.time()
+            data = _patch_header_fields_from_excel(data, saved_path, block)
             data = _patch_cost_summary_from_excel(data, saved_path, block)
             quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path, bpm_no=bpm_no)
             t_db = time.time() - t1

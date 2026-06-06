@@ -52,8 +52,12 @@
             <!-- 上传区域 -->
             <div class="bg-white rounded-lg shadow-md p-6 mb-6">
                 <h2 class="text-lg font-semibold mb-4 text-blue-600">上传成本分析表</h2>
-                <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分 Sheet 并入库。</p>
+                <p class="text-sm text-gray-600 mb-4">支持 .xlsx / .xls 格式，系统将自动拆分 Sheet 并入库。BPM流程号为必填。</p>
                 <form id="uploadForm" class="space-y-4">
+                    <label class="block text-sm text-gray-700">
+                        BPM流程号 <span class="text-red-500">*</span>
+                        <input type="text" id="uploadBpmNo" class="mt-1 w-full rounded border px-3 py-2 text-sm font-mono uppercase outline-none focus:ring-1 focus:ring-blue-400" placeholder="例如 EG-B015-26050127" required>
+                    </label>
                     <input type="file" id="excelFile" accept=".xls,.xlsx" class="block w-full text-sm text-gray-500
                         file:mr-4 file:py-2 file:px-4
                         file:rounded-full file:border-0
@@ -215,14 +219,17 @@
             list.innerHTML = groups.map(group => {
                 const rows = group.items.map(it => {
                     const time = it.create_time ? it.create_time.replace('T', ' ').substring(11, 16) : '';
-                    const tooltip = [it.customer_name, it.product_spec, it.filename, it.upload_user].filter(Boolean).join(' | ');
-                    const uploader = isAdmin && it.upload_user ? '<span class=\"text-xs text-gray-400 mr-1\">' + escapeHtml(it.upload_user) + '</span>' : '';
+                    const tooltip = [it.customer_name, it.package_method, it.product_spec, it.filename, it.upload_user].filter(Boolean).join(' | ');
+                    const uploader = it.upload_user
+                        ? '<span class=\"text-xs text-gray-400 mr-1\" title=\"上传人\">' + escapeHtml(it.upload_user) + '</span>'
+                        : '';
                     const encodedCode = encodeURIComponent(it.quotation_code);
                     return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
                         '<button class="flex-1 min-w-0 text-left" title="' + escapeHtml(tooltip) + '" onclick="previewQuotation(decodeURIComponent(\'' + encodedCode + '\'))">' +
                             '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
                             '<span class="text-xs font-mono text-blue-500 truncate block">' + escapeHtml(it.bpm_no || '-') + '</span>' +
-                            '<span class="text-xs text-gray-400 truncate block">' + escapeHtml(it.customer_name + ' ' + it.product_spec).substring(0, 24) + '</span>' +
+                            '<span class="text-xs text-gray-400 truncate block">' + escapeHtml([it.customer_name, it.package_method, it.product_spec].filter(Boolean).join(' ')).substring(0, 24) + '</span>' +
+                            '<span class="text-xs text-gray-400 truncate block">上传人：' + escapeHtml(it.upload_user || '-') + '</span>' +
                         '</button>' +
                         '<div class="flex items-center gap-2 shrink-0">' +
                             uploader +
@@ -391,14 +398,18 @@
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fileInput = document.getElementById('excelFile');
+            const bpmInput = document.getElementById('uploadBpmNo');
             const uploadBtn = document.getElementById('uploadBtn');
             const progressCard = document.getElementById('progressCard');
             const progressContent = document.getElementById('progressContent');
 
+            const bpmNo = (bpmInput.value || '').trim().toUpperCase();
+            if (!bpmNo) { alert('请先填写 BPM流程号'); bpmInput.focus(); return; }
             if (!fileInput.files.length) { alert('请选择文件'); return; }
 
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
+            formData.append('bpm_no', bpmNo);
 
             uploadBtn.disabled = true;
             uploadBtn.textContent = '正在处理...';
@@ -443,6 +454,7 @@
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = '上传并清洗入库';
                 fileInput.value = '';
+                bpmInput.value = '';
                 loadHistory(); // 上传完成后刷新历史
             }
         });

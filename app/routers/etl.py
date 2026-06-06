@@ -5,7 +5,7 @@ import time
 import shutil
 import logging
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -31,13 +31,6 @@ from app.services.full_price_calc_service import calculate_full_price
 from app.services.calculation_skill_engine import list_calculation_skills
 from app.services.calculation_diagnosis_service import diagnose_calculation
 from app.services.excel_service import render_quotation_excel
-from app.services.bpm_lookup_service import (
-    build_quotation_code_filter,
-    get_bpm_flows_by_quotation_codes,
-    get_quotation_codes_by_bpm,
-    normalize_bpm_no,
-    resolve_bpm_no,
-)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -88,6 +81,7 @@ class CalculationDiagnosisRequest(BaseModel):
 @router.post("/upload_excel")
 async def upload_and_process_excel(
     file: UploadFile = File(...),
+    bpm_no: str = Form(""),
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
     request: Request = None,
@@ -95,6 +89,9 @@ async def upload_and_process_excel(
     """上传 Excel，扫描后通过 SSE 流式返回处理进度"""
     if user.is_reviewer:
         raise HTTPException(status_code=403, detail="审价科账号不允许上传成本分析表")
+    bpm_no = (bpm_no or "").strip().upper()
+    if not bpm_no:
+        raise HTTPException(status_code=400, detail="请先填写 BPM流程号")
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .xls 格式的文件")
 
@@ -142,6 +139,7 @@ async def upload_and_process_excel(
             tenant_id=user.tenant_id,
             username=user.username,
             display_name=user.display_name,
+            bpm_no=bpm_no,
         )
         try:
             async for event in gen:
@@ -198,18 +196,10 @@ def list_quotations(
         raise HTTPException(status_code=403, detail="无权查看批量报价列表")
     query = db.query(QuotationMain).filter(QuotationMain.deleted == False)
     bpm_code = ""
-    codes: list[str] = []
     if bpm_no:
-        bpm_code = normalize_bpm_no(bpm_no)
-        codes = get_quotation_codes_by_bpm(db, bpm_code)
-        if not codes:
-            return {"items": [], "bpm_no": bpm_code, "mapped_codes": []}
-        query = query.filter(build_quotation_code_filter(QuotationMain.quotation_code, codes))
+        bpm_code = bpm_no.strip().upper()
+        query = query.filter(QuotationMain.bpm_no == bpm_code)
     rows = query.order_by(QuotationMain.create_time.desc()).limit(1000).all()
-    bpm_map = get_bpm_flows_by_quotation_codes(
-        db,
-        [quotation.quotation_code for quotation in rows if quotation.quotation_code],
-    )
     items = []
     for quotation in rows:
         review_status = get_review_status(quotation)
@@ -217,15 +207,16 @@ def list_quotations(
             continue
         items.append({
             "quotation_code": quotation.quotation_code or "",
-            "bpm_no": bpm_code if bpm_no else resolve_bpm_no(bpm_map, quotation.quotation_code, quotation.bpm_no),
+            "bpm_no": quotation.bpm_no or "",
             "customer_name": quotation.customer_name or "",
+            "package_method": getattr(quotation, "package_method", "") or "",
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",
             "create_time": quotation.create_time.isoformat() if quotation.create_time else None,
             "review_status": review_status,
             "final_selling_price": str(quotation.final_selling_price or ""),
         })
-    return {"items": items, "bpm_no": bpm_code, "mapped_codes": codes if bpm_no else []}
+    return {"items": items, "bpm_no": bpm_code, "mapped_codes": [item["quotation_code"] for item in items] if bpm_no else []}
 
 
 @router.delete("/quotation")

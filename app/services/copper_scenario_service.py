@@ -4,11 +4,6 @@ from sqlalchemy.orm import Session
 
 from app.models.calc_param import QuotationCalcParam
 from app.models.quotation import QuotationMain
-from app.services.bpm_lookup_service import (
-    build_quotation_code_filter,
-    get_quotation_codes_by_bpm,
-    normalize_bpm_no,
-)
 from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE
 from app.services.conductor_calc_service import (
     _is_conductor_row,
@@ -47,22 +42,16 @@ def build_copper_bands() -> list[dict]:
 
 
 def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
-    bpm_no = normalize_bpm_no(bpm_no)
+    bpm_no = (bpm_no or "").strip().upper()
     if not bpm_no:
         raise ValueError("请填写 BPM 流程号")
 
-    codes = get_quotation_codes_by_bpm(db, bpm_no)
-    quotations = []
-    if codes:
-        quotations = (
-            db.query(QuotationMain)
-            .filter(
-                QuotationMain.deleted == False,
-                build_quotation_code_filter(QuotationMain.quotation_code, codes),
-            )
-            .order_by(QuotationMain.quotation_code)
-            .all()
-        )
+    quotations = (
+        db.query(QuotationMain)
+        .filter(QuotationMain.deleted == False, QuotationMain.bpm_no == bpm_no)
+        .order_by(QuotationMain.quotation_code)
+        .all()
+    )
     if not quotations:
         raise ValueError("未找到该 BPM 流程号下的成本分析表")
 
@@ -97,7 +86,12 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
             "bands": result_by_band,
             "errors": sorted(set(errors)),
         })
-    return {"bpm_no": bpm_no, "bands": bands, "items": rows, "mapped_codes": codes}
+    return {
+        "bpm_no": bpm_no,
+        "bands": bands,
+        "items": rows,
+        "mapped_codes": [quotation.quotation_code for quotation in quotations if quotation.quotation_code],
+    }
 
 
 def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_price: Decimal) -> dict:

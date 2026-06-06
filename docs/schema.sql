@@ -6,20 +6,28 @@
 CREATE TABLE quotation_main (
 	id SERIAL NOT NULL, 
 	quotation_no VARCHAR, 
+	bpm_no VARCHAR,
 	customer VARCHAR, 
+	customer_address VARCHAR,
+	package_method VARCHAR,
 	analysis_date DATE, 
 	structure VARCHAR, 
 	product_spec VARCHAR, 
+	remark VARCHAR,
 	original_file_path VARCHAR, 
 	extracted_tags JSON, 
 	PRIMARY KEY (id)
 );
 COMMENT ON COLUMN quotation_main.id IS '主键ID';
 COMMENT ON COLUMN quotation_main.quotation_no IS '报价单编号 (如: FHLR2GCB2G-50-003)';
+COMMENT ON COLUMN quotation_main.bpm_no IS '工程上传时必填的 BPM流程号';
 COMMENT ON COLUMN quotation_main.customer IS '客户名称/代号 (如: 6010634 800木轴)';
+COMMENT ON COLUMN quotation_main.customer_address IS '收货地（市）';
+COMMENT ON COLUMN quotation_main.package_method IS '包装方式-米数';
 COMMENT ON COLUMN quotation_main.analysis_date IS '分析日期';
 COMMENT ON COLUMN quotation_main.structure IS '结构 (如: 1596/0.20BC)';
 COMMENT ON COLUMN quotation_main.product_spec IS '品名规格 (如: FHLR2GCB2G 50mm2 -40~180℃ 600V AC/1000V DC)';
+COMMENT ON COLUMN quotation_main.remark IS '备注';
 COMMENT ON COLUMN quotation_main.original_file_path IS '原始Excel文件存储路径';
 COMMENT ON COLUMN quotation_main.extracted_tags IS '提取的业务标签 (料号、线径等)，用于PG精确过滤';
 

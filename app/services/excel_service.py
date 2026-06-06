@@ -45,14 +45,16 @@ def render_quotation_excel(quotation: QuotationMain) -> BytesIO:
     worksheet.row_dimensions[row].height = 27
 
     row += 1
-    _merge_write(worksheet, row, 1, row, 7, "")
+    _merge_write(worksheet, row, 1, row, 4, "")
+    _write(worksheet, row, 5, "包装方式-米数:", bold=True)
+    _merge_write(worksheet, row, 6, row, 7, getattr(quotation, "package_method", "") or "", horizontal="left")
     _write(worksheet, row, 8, "编号:", bold=True)
     _write(worksheet, row, 9, quotation.quotation_code)
 
     row += 1
-    _write(worksheet, row, 1, "客户:", bold=True)
+    _write(worksheet, row, 1, "客户名称:", bold=True)
     _merge_write(worksheet, row, 2, row, 4, quotation.customer_name, horizontal="left")
-    _write(worksheet, row, 5, "地址:", bold=True)
+    _write(worksheet, row, 5, "收货地（市）:", bold=True)
     _write(worksheet, row, 6, quotation.customer_address, horizontal="left")
     _write(worksheet, row, 7, "分析日期:", bold=True)
     _merge_write(worksheet, row, 8, row, 9, quotation.analysis_date, number_format="yyyy-mm-dd")
@@ -183,6 +185,10 @@ def render_quotation_excel(quotation: QuotationMain) -> BytesIO:
     _write(worksheet, row, 6, quotation.monthly_interest, fill=FEE_VALUE_FILL, number_format="0.####%")
     _write(worksheet, row, 7, quotation.corporate_tax_rate, fill=FEE_VALUE_FILL, number_format="0.####%")
     _merge_write(worksheet, row, 8, row, 9, "", fill=PRICE_FILL)
+
+    row += 1
+    _write(worksheet, row, 1, "备注:", bold=True)
+    _merge_write(worksheet, row, 2, row, 9, quotation.remark or "", horizontal="left", wrap_text=True)
 
     worksheet.freeze_panes = f"A{material_header_row + 2}"
     worksheet.print_area = f"A1:I{row}"

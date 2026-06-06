@@ -395,7 +395,14 @@
         function renderList(elementId, items, keyword, status) {
             const kw = (keyword || '').trim().toUpperCase();
             const filtered = items.filter(item =>
-                ((item.quotation_code || '') + ' ' + (item.bpm_no || '')).toUpperCase().includes(kw)
+                (
+                    (item.quotation_code || '') + ' ' +
+                    (item.bpm_no || '') + ' ' +
+                    (item.customer_name || '') + ' ' +
+                    (item.package_method || '') + ' ' +
+                    (item.product_spec || '') + ' ' +
+                    (item.upload_user || '')
+                ).toUpperCase().includes(kw)
             );
             const element = document.getElementById(elementId);
             if (!filtered.length) {
@@ -412,7 +419,7 @@
                     encodeURIComponent(item.quotation_code) + '\', \'' + status + '\')">' +
                     '<span class="block truncate font-mono text-xs text-gray-800">' + escapeHtml(item.quotation_code) + '</span>' +
                     '<span class="bpm-row mt-1 block truncate font-mono text-xs text-blue-500"><span class="bpm-text">BPM：' + escapeHtml(bpmNo) + '</span>' + copyButton + '</span>' +
-                    '<span class="mt-1 block truncate text-xs text-gray-400">' + escapeHtml(item.customer_name + ' ' + item.product_spec) + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">' + escapeHtml([item.customer_name, item.package_method, item.product_spec].filter(Boolean).join(' ')) + '</span>' +
                     '<span class="mt-1 block truncate text-xs text-gray-400">上传人：' + escapeHtml(item.upload_user) + '</span>' +
                     '<span class="mt-1 block font-mono text-xs text-gray-500">上传时间：' + escapeHtml(formatUploadTime(item.create_time)) + '</span>' +
                 '</div>';
