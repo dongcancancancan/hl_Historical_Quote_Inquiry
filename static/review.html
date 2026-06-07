@@ -152,6 +152,7 @@
 
         let pendingItems = [];
         let selectedCode = '';
+        let selectedInstanceId = null;
         let selectedStatus = '';
         const sidebarCollapsed = { pending: false };
         let pendingSearchTimer = null;
@@ -176,6 +177,12 @@
 
         function formatUploadTime(value) {
             return value ? value.replace('T', ' ').substring(0, 19) : '-';
+        }
+
+        function selectedQueryParams() {
+            let query = 'code=' + encodeURIComponent(selectedCode || '');
+            if (selectedInstanceId) query += '&instance_id=' + encodeURIComponent(selectedInstanceId);
+            return query;
         }
 
         async function copyBpmNo(event, encodedBpmNo) {
@@ -410,15 +417,18 @@
                 return;
             }
             element.innerHTML = filtered.map(item => {
-                const active = item.quotation_code === selectedCode ? ' border-blue-400 bg-blue-50' : ' border-gray-200 hover:bg-gray-50';
+                const active = (item.instance_id && selectedInstanceId)
+                    ? (Number(item.instance_id) === Number(selectedInstanceId) ? ' border-blue-400 bg-blue-50' : ' border-gray-200 hover:bg-gray-50')
+                    : (item.quotation_code === selectedCode ? ' border-blue-400 bg-blue-50' : ' border-gray-200 hover:bg-gray-50');
                 const bpmNo = item.bpm_no || '-';
                 const copyButton = item.bpm_no
                     ? '<button type="button" class="bpm-copy-btn" onclick="copyBpmNo(event, \'' + encodeURIComponent(item.bpm_no) + '\')">复制</button>'
                     : '';
                 return '<div class="quote-card mb-2 w-full border p-2 text-left' + active + '" onclick="selectQuotation(\'' +
-                    encodeURIComponent(item.quotation_code) + '\', \'' + status + '\')">' +
+                    encodeURIComponent(item.quotation_code) + '\', \'' + status + '\', ' + (item.instance_id || 'null') + ')">' +
                     '<span class="block truncate font-mono text-xs text-gray-800">' + escapeHtml(item.quotation_code) + '</span>' +
                     '<span class="bpm-row mt-1 block truncate font-mono text-xs text-blue-500"><span class="bpm-text">BPM：' + escapeHtml(bpmNo) + '</span>' + copyButton + '</span>' +
+                    '<span class="mt-1 block truncate text-xs text-gray-400">报价日期：' + escapeHtml(item.quote_date || '-') + '</span>' +
                     '<span class="mt-1 block truncate text-xs text-gray-400">' + escapeHtml([item.customer_name, item.package_method, item.product_spec].filter(Boolean).join(' ')) + '</span>' +
                     '<span class="mt-1 block truncate text-xs text-gray-400">上传人：' + escapeHtml(item.upload_user) + '</span>' +
                     '<span class="mt-1 block font-mono text-xs text-gray-500">上传时间：' + escapeHtml(formatUploadTime(item.create_time)) + '</span>' +
@@ -426,8 +436,9 @@
             }).join('');
         }
 
-        async function selectQuotation(encodedCode, status) {
+        async function selectQuotation(encodedCode, status, instanceId) {
             selectedCode = decodeURIComponent(encodedCode);
+            if (instanceId !== undefined) selectedInstanceId = instanceId ? Number(instanceId) : null;
             selectedStatus = status;
             lastCalculationError = '';
             renderLists();
@@ -445,7 +456,7 @@
             document.getElementById('quoteBtn').classList.toggle('hidden', status === 'quoted');
             loadCalcParams();
             try {
-                const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(selectedCode), {
+                const res = await fetch('/api/v1/etl/quotation/preview?' + selectedQueryParams(), {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '加载失败'); }
@@ -463,7 +474,7 @@
             calcParamAutoSaveTimer = null;
             calcParamDirty = false;
             setCalcParamStatus('参数加载中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calc-params?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calc-params?' + selectedQueryParams(), {
                 headers: { 'Authorization': 'Bearer ' + token }
             });
             const data = await res.json();
@@ -499,10 +510,13 @@
             const body = getCalcParamValues();
             body.copper_price = body.copper_price || null;
             const savingCode = selectedCode;
+            const savingInstanceId = selectedInstanceId;
             setCalcParamStatus(options.auto ? '自动保存中...' : '保存中...', 'info');
             calcParamSavingPromise = (async () => {
                 try {
-                    const res = await fetch('/api/v1/etl/quotation/calc-params?code=' + encodeURIComponent(savingCode), {
+                    let query = 'code=' + encodeURIComponent(savingCode || '');
+                    if (savingInstanceId) query += '&instance_id=' + encodeURIComponent(savingInstanceId);
+                    const res = await fetch('/api/v1/etl/quotation/calc-params?' + query, {
                         method: 'PATCH',
                         headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
                         body: JSON.stringify(body),
@@ -513,7 +527,7 @@
                         if (!options.silent) alert('计算参数保存失败：' + (data.detail || '未知错误'));
                         return false;
                     }
-                    if (selectedCode === savingCode) {
+                    if (selectedCode === savingCode && selectedInstanceId === savingInstanceId) {
                         document.getElementById('calcCopperPrice').value = data.copper_price || '';
                         document.getElementById('calcCopperRodFee').value = data.copper_rod_process_fee || '1055';
                         document.getElementById('calcVatRate').value = data.vat_rate || '1.13';
@@ -543,7 +557,7 @@
             if (!(await ensureCalcParamsReady())) return;
             if (!confirm('确认根据铜价和铜加工费重新计算导体/编织单价、材料金额和制程费用吗？')) return;
             setCalcParamStatus('导体/编织计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/conductor?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/conductor?' + selectedQueryParams(), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
             });
@@ -558,12 +572,12 @@
                 return alert('导体/编织计算失败：' + detail);
             }
             setCalcParamStatus('已计算材料 ' + data.calculated + ' 行，制程费用 ' + (data.process_calculated || 0) + ' 行', 'ok');
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
         }
 
         async function showConductorTraces() {
             if (!selectedCode) return;
-            const res = await fetch('/api/v1/etl/quotation/calculate/conductor/traces?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/conductor/traces?' + selectedQueryParams(), {
                 headers: { 'Authorization': 'Bearer ' + token },
             });
             const data = await res.json();
@@ -584,7 +598,7 @@
             if (!selectedCode) return;
             if (!confirm('确认重新计算 C 开头胶料、外购物料的单价、材料金额，以及绝缘/外被/倒线/集合制程费用吗？')) return;
             setCalcParamStatus('胶料/外购计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/glue?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/glue?' + selectedQueryParams(), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
             });
@@ -594,12 +608,12 @@
                 return alert('胶料/外购计算失败：' + (data.detail || '未知错误'));
             }
             setCalcParamStatus('已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，色母 ' + (data.color_masterbatch_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行，倒线制程 ' + (data.rewind_process_calculated || 0) + ' 行，集合制程 ' + (data.collection_process_calculated || 0) + ' 行', 'ok');
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
         }
 
         async function showGlueTraces() {
             if (!selectedCode) return;
-            const res = await fetch('/api/v1/etl/quotation/calculate/glue/traces?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/glue/traces?' + selectedQueryParams(), {
                 headers: { 'Authorization': 'Bearer ' + token },
             });
             const data = await res.json();
@@ -621,7 +635,7 @@
             if (!(await ensureCalcParamsReady())) return;
             if (!confirm('确认按当前全部逻辑一键计算最终售价吗？系统会依次计算导体/编织、胶料/外购、制程费用和最终售价。')) return;
             setCalcParamStatus('最终售价计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/full-price?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/full-price?' + selectedQueryParams(), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token },
             });
@@ -638,7 +652,7 @@
             }
             lastCalculationError = '';
             const statusText = buildFullPriceStatus(data);
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
             setCalcParamStatus(statusText, 'ok');
         }
 
@@ -656,7 +670,7 @@
 
         async function showPriceSummaryTraces() {
             if (!selectedCode) return;
-            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary/traces?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary/traces?' + selectedQueryParams(), {
                 headers: { 'Authorization': 'Bearer ' + token },
             });
             const data = await res.json();
@@ -687,7 +701,7 @@
             }
             setCalcParamStatus('智能诊断中...', 'info');
             setDiagnosisLoading();
-            const res = await fetch('/api/v1/etl/quotation/calculate/diagnose?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/calculate/diagnose?' + selectedQueryParams(), {
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error_message: requestError }),
@@ -797,7 +811,7 @@
         }
 
         function cancelEditing() {
-            if (selectedCode) selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            if (selectedCode) selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
         }
 
         async function saveChanges() {
@@ -812,7 +826,7 @@
                 document.getElementById('saveStatus').textContent = '没有修改';
                 return;
             }
-            const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation?' + selectedQueryParams(), {
                 method: 'PATCH',
                 headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ changes }),
@@ -821,7 +835,7 @@
             if (!res.ok) return alert('保存失败：' + (data.detail || '未知错误'));
             selectedCode = data.quotation_code;
             await loadHistory();
-            await selectQuotation(encodeURIComponent(selectedCode), 'pending');
+            await selectQuotation(encodeURIComponent(selectedCode), 'pending', selectedInstanceId);
             document.getElementById('saveStatus').textContent = '已保存';
         }
 
@@ -830,7 +844,7 @@
             if (selectedStatus === 'quoted') return alert('已报价的成本分析表只能查看，不能清空单价');
             if (!confirm('确认清空 ' + selectedCode + ' 的全部材料单价和材料金额吗？清空后可点击一键计算重新检索单价。')) return;
             setCalcParamStatus('正在清空单价...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/unit-prices/clear?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/unit-prices/clear?' + selectedQueryParams(), {
                 method: 'PATCH',
                 headers: { 'Authorization': 'Bearer ' + token },
             });
@@ -839,13 +853,13 @@
                 setCalcParamStatus('', 'info');
                 return alert('清空单价失败：' + (data.detail || '未知错误'));
             }
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus);
+            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
             setCalcParamStatus('已清空 ' + (data.cleared || 0) + ' 行单价，可重新一键计算', 'ok');
         }
 
         async function markQuoted() {
             if (!selectedCode || !confirm('确认将 ' + selectedCode + ' 标记为已报价吗？标记后将只能查看。')) return;
-            const res = await fetch('/api/v1/etl/quotation/review-status?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/review-status?' + selectedQueryParams(), {
                 method: 'PATCH',
                 headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'quoted' }),
@@ -853,12 +867,12 @@
             const data = await res.json();
             if (!res.ok) return alert('标记失败：' + (data.detail || '未知错误'));
             await loadHistory();
-            await selectQuotation(encodeURIComponent(selectedCode), 'quoted');
+            await selectQuotation(encodeURIComponent(selectedCode), 'quoted', selectedInstanceId);
         }
 
         async function exportExcel() {
             if (!selectedCode) return;
-            const res = await fetch('/api/v1/etl/quotation/export?code=' + encodeURIComponent(selectedCode), {
+            const res = await fetch('/api/v1/etl/quotation/export?' + selectedQueryParams(), {
                 headers: { 'Authorization': 'Bearer ' + token }
             });
             if (!res.ok) { const d = await res.json(); return alert('导出失败：' + (d.detail || '未知错误')); }

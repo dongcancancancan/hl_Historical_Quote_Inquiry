@@ -1,9 +1,10 @@
 from decimal import Decimal, ROUND_HALF_UP
+from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
 
 from app.models.calc_param import QuotationCalcParam
-from app.models.quotation import QuotationMain
+from app.models.quotation import QuotationBpmInstance, QuotationMain
 from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE
 from app.services.conductor_calc_service import (
     _is_conductor_row,
@@ -46,23 +47,33 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
     if not bpm_no:
         raise ValueError("请填写 BPM 流程号")
 
-    quotations = (
-        db.query(QuotationMain)
-        .filter(QuotationMain.deleted == False, QuotationMain.bpm_no == bpm_no)
-        .order_by(QuotationMain.quotation_code)
+    rows = (
+        db.query(QuotationMain, QuotationBpmInstance)
+        .join(QuotationBpmInstance, QuotationBpmInstance.quotation_main_id == QuotationMain.id)
+        .filter(
+            QuotationMain.deleted == False,
+            QuotationBpmInstance.deleted == False,
+            QuotationBpmInstance.bpm_no == bpm_no,
+        )
+        .order_by(QuotationMain.quotation_code, QuotationBpmInstance.id)
         .all()
     )
-    if not quotations:
+    if not rows:
         raise ValueError("未找到该 BPM 流程号下的成本分析表")
 
     bands = build_copper_bands()
     rows = []
-    for quotation in quotations:
+    for quotation, instance in rows:
         params = (
             db.query(QuotationCalcParam)
             .filter(QuotationCalcParam.quotation_main_id == quotation.id)
             .first()
         )
+        if instance:
+            params = SimpleNamespace(
+                copper_rod_process_fee=instance.copper_rod_process_fee or (params.copper_rod_process_fee if params else DEFAULT_COPPER_ROD_PROCESS_FEE),
+                vat_rate=instance.vat_rate or (params.vat_rate if params else DEFAULT_VAT_RATE),
+            )
         result_by_band = []
         errors = []
         for band in bands:
@@ -81,8 +92,8 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
             "bpm_no": bpm_no,
             "customer_name": quotation.customer_name or "",
             "product_spec": quotation.product_spec or "",
-            "review_status": get_review_status(quotation),
-            "current_final_selling_price": _decimal_text(quotation.final_selling_price),
+            "review_status": get_review_status(quotation, instance),
+            "current_final_selling_price": _decimal_text(instance.final_selling_price or quotation.final_selling_price),
             "bands": result_by_band,
             "errors": sorted(set(errors)),
         })
@@ -90,7 +101,7 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
         "bpm_no": bpm_no,
         "bands": bands,
         "items": rows,
-        "mapped_codes": [quotation.quotation_code for quotation in quotations if quotation.quotation_code],
+        "mapped_codes": [quotation.quotation_code for quotation, _instance in rows if quotation.quotation_code],
     }
 
 

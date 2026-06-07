@@ -15,6 +15,7 @@ CREATE TABLE quotation_main (
 	product_spec VARCHAR, 
 	remark VARCHAR,
 	original_file_path VARCHAR, 
+	content_hash VARCHAR,
 	extracted_tags JSON, 
 	PRIMARY KEY (id)
 );
@@ -29,7 +30,39 @@ COMMENT ON COLUMN quotation_main.structure IS '结构 (如: 1596/0.20BC)';
 COMMENT ON COLUMN quotation_main.product_spec IS '品名规格 (如: FHLR2GCB2G 50mm2 -40~180℃ 600V AC/1000V DC)';
 COMMENT ON COLUMN quotation_main.remark IS '备注';
 COMMENT ON COLUMN quotation_main.original_file_path IS '原始Excel文件存储路径';
+COMMENT ON COLUMN quotation_main.content_hash IS '成本分析内容指纹（忽略日期，用于同表复用和同号变更拦截）';
 COMMENT ON COLUMN quotation_main.extracted_tags IS '提取的业务标签 (料号、线径等)，用于PG精确过滤';
+
+-- ====== BPM询价实例表：同一成本分析表可对应多个 BPM 流程 ======
+
+CREATE TABLE quotation_bpm_instance (
+	id SERIAL NOT NULL,
+	tenant_id VARCHAR,
+	quotation_main_id INTEGER NOT NULL,
+	quotation_code VARCHAR NOT NULL,
+	bpm_no VARCHAR NOT NULL,
+	quote_date DATE,
+	source_file_path VARCHAR,
+	upload_user VARCHAR,
+	upload_time TIMESTAMP,
+	review_status VARCHAR,
+	copper_price FLOAT,
+	copper_rod_process_fee FLOAT,
+	vat_rate FLOAT,
+	cost FLOAT,
+	profit_selling_price FLOAT,
+	non_profit_price FLOAT,
+	final_selling_price FLOAT,
+	quoted_time TIMESTAMP,
+	deleted BOOLEAN,
+	PRIMARY KEY (id),
+	FOREIGN KEY(quotation_main_id) REFERENCES quotation_main (id)
+);
+COMMENT ON COLUMN quotation_bpm_instance.quotation_main_id IS '复用的成本分析表主数据ID';
+COMMENT ON COLUMN quotation_bpm_instance.bpm_no IS '本次询价的 BPM流程号';
+COMMENT ON COLUMN quotation_bpm_instance.quote_date IS '本次BPM报价/分析日期，优先于主表日期展示';
+COMMENT ON COLUMN quotation_bpm_instance.review_status IS '审价状态：pending/quoted';
+COMMENT ON COLUMN quotation_bpm_instance.final_selling_price IS '本次报价实例的最终售价快照';
 
 -- ====== 材料成本明细表：对应原表上半部分的 '材料金额' 区域 ======
 

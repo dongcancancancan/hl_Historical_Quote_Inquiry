@@ -6,7 +6,13 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models.quotation import QuotationFieldOverride, QuotationMain, QuotationMaterial, QuotationProcessFee
+from app.models.quotation import (
+    QuotationBpmInstance,
+    QuotationFieldOverride,
+    QuotationMain,
+    QuotationMaterial,
+    QuotationProcessFee,
+)
 from app.models.user import User
 from app.services.quotation_summary_service import apply_quotation_summaries
 from app.services.unit_price_override_service import (
@@ -114,7 +120,9 @@ def _admin_creator_names(db: Session) -> list[str]:
     return list(names)
 
 
-def get_review_status(quotation: QuotationMain) -> str:
+def get_review_status(quotation: QuotationMain, instance: QuotationBpmInstance | None = None) -> str:
+    if instance:
+        return REVIEW_QUOTED if instance.review_status == REVIEW_QUOTED else REVIEW_PENDING
     return get_review_status_from_tags(quotation.extracted_tags)
 
 
@@ -123,9 +131,27 @@ def get_review_status_from_tags(raw_tags: str | None) -> str:
     return REVIEW_QUOTED if tags.get("review_status") == REVIEW_QUOTED else REVIEW_PENDING
 
 
-def set_review_status(db: Session, quotation: QuotationMain, status: str, updater: str) -> str:
+def set_review_status(
+    db: Session,
+    quotation: QuotationMain,
+    status: str,
+    updater: str,
+    instance: QuotationBpmInstance | None = None,
+) -> str:
     if status not in {REVIEW_PENDING, REVIEW_QUOTED}:
         raise ValueError("无效的报价状态")
+    if instance:
+        now = datetime.now()
+        instance.review_status = status
+        instance.quoted_time = now if status == REVIEW_QUOTED else None
+        instance.cost = quotation.cost
+        instance.profit_selling_price = quotation.profit_selling_price
+        instance.non_profit_price = quotation.non_profit_price
+        instance.final_selling_price = quotation.final_selling_price
+        instance.updater = updater
+        instance.update_time = now
+        db.commit()
+        return status
     tags = _load_tags(quotation.extracted_tags)
     tags["review_status"] = status
     quotation.extracted_tags = json.dumps(tags, ensure_ascii=False)
@@ -137,9 +163,52 @@ def set_review_status(db: Session, quotation: QuotationMain, status: str, update
 
 def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict[str, list[dict]]:
     search = (search or "").strip()
-    filters = [QuotationMain.deleted == False]
+    filters = [
+        QuotationMain.deleted == False,
+        QuotationBpmInstance.deleted == False,
+    ]
     if search:
         filters.append(or_(
+            QuotationMain.quotation_code.contains(search),
+            QuotationMain.bpm_no.contains(search),
+            QuotationBpmInstance.bpm_no.contains(search),
+            QuotationMain.customer_name.contains(search),
+            QuotationMain.customer_address.contains(search),
+            QuotationMain.package_method.contains(search),
+            QuotationMain.product_spec.contains(search),
+        ))
+
+    rows = (
+        db.query(QuotationMain, QuotationBpmInstance)
+        .join(QuotationBpmInstance, QuotationBpmInstance.quotation_main_id == QuotationMain.id)
+        .filter(*filters)
+        .order_by(QuotationBpmInstance.upload_time.desc(), QuotationBpmInstance.id.desc())
+        .limit(limit)
+        .all()
+    )
+    history = {REVIEW_PENDING: [], REVIEW_QUOTED: []}
+    instance_main_ids = set()
+    for quotation, instance in rows:
+        instance_main_ids.add(quotation.id)
+        status = get_review_status(quotation, instance)
+        history[status].append({
+            "instance_id": instance.id,
+            "quotation_code": quotation.quotation_code,
+            "bpm_no": instance.bpm_no or quotation.bpm_no or "",
+            "customer_name": quotation.customer_name or "",
+            "package_method": getattr(quotation, "package_method", "") or "",
+            "product_spec": quotation.product_spec or "",
+            "upload_user": instance.upload_user or quotation.creator or "",
+            "create_time": instance.upload_time.isoformat() if instance.upload_time else None,
+            "quote_date": instance.quote_date.isoformat() if instance.quote_date else None,
+            "review_status": status,
+            "final_selling_price": str(instance.final_selling_price or quotation.final_selling_price or ""),
+        })
+    legacy_filters = [QuotationMain.deleted == False]
+    if instance_main_ids:
+        legacy_filters.append(QuotationMain.id.notin_(instance_main_ids))
+    if search:
+        legacy_filters.append(or_(
             QuotationMain.quotation_code.contains(search),
             QuotationMain.bpm_no.contains(search),
             QuotationMain.customer_name.contains(search),
@@ -147,18 +216,17 @@ def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict
             QuotationMain.package_method.contains(search),
             QuotationMain.product_spec.contains(search),
         ))
-
     quotations = (
         db.query(QuotationMain)
-        .filter(*filters)
+        .filter(*legacy_filters)
         .order_by(QuotationMain.create_time.desc())
         .limit(limit)
         .all()
     )
-    history = {REVIEW_PENDING: [], REVIEW_QUOTED: []}
     for quotation in quotations:
         status = get_review_status(quotation)
         history[status].append({
+            "instance_id": None,
             "quotation_code": quotation.quotation_code,
             "bpm_no": quotation.bpm_no or "",
             "customer_name": quotation.customer_name or "",
@@ -166,7 +234,9 @@ def get_review_history(db: Session, limit: int = 1000, search: str = "") -> dict
             "product_spec": quotation.product_spec or "",
             "upload_user": quotation.creator or "",
             "create_time": quotation.create_time.isoformat() if quotation.create_time else None,
+            "quote_date": quotation.analysis_date.isoformat() if quotation.analysis_date else None,
             "review_status": status,
+            "final_selling_price": str(quotation.final_selling_price or ""),
         })
     return history
 
@@ -176,12 +246,14 @@ def update_quotation_fields(
     quotation: QuotationMain,
     changes: list[dict],
     updater: str,
+    instance: QuotationBpmInstance | None = None,
 ) -> str:
-    if get_review_status(quotation) == REVIEW_QUOTED:
+    if get_review_status(quotation, instance) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能修改")
     now = datetime.now()
     materials = {item.id: item for item in quotation.materials if not item.deleted}
     processes = {item.id: item for item in quotation.processes if not item.deleted}
+    instance_fields = {"analysis_date", "cost", "profit_selling_price", "non_profit_price", "final_selling_price"}
 
     for change in changes:
         entity = change.get("entity")
@@ -194,6 +266,18 @@ def update_quotation_fields(
             field_types = MAIN_FIELDS
             if record_id != quotation.id:
                 raise ValueError("主表记录不属于当前成本分析表")
+            if instance and field in instance_fields:
+                field_type = field_types.get(field)
+                if not field_type:
+                    raise ValueError(f"字段 {field} 不允许修改")
+                value = _parse_update_value(raw_value, field_type)
+                if field == "analysis_date":
+                    instance.quote_date = value
+                else:
+                    setattr(instance, field, value)
+                instance.updater = updater
+                instance.update_time = now
+                continue
         elif entity == "material":
             target = materials.get(record_id)
             field_types = MATERIAL_FIELDS
@@ -245,12 +329,21 @@ def update_quotation_fields(
             target.update_time = now
 
     apply_quotation_summaries(quotation, materials.values(), processes.values(), updater, now)
+    if instance:
+        instance.quotation_code = quotation.quotation_code or instance.quotation_code
+        instance.updater = updater
+        instance.update_time = now
     db.commit()
     return quotation.quotation_code
 
 
-def clear_material_unit_prices(db: Session, quotation: QuotationMain, updater: str) -> dict:
-    if get_review_status(quotation) == REVIEW_QUOTED:
+def clear_material_unit_prices(
+    db: Session,
+    quotation: QuotationMain,
+    updater: str,
+    instance: QuotationBpmInstance | None = None,
+) -> dict:
+    if get_review_status(quotation, instance) == REVIEW_QUOTED:
         raise ValueError("该成本分析表已报价，只能查看，不能修改")
 
     now = datetime.now()
@@ -325,7 +418,7 @@ def _parse_update_value(raw_value, field_type: str):
     return number
 
 
-def render_quotation_preview(quotation: QuotationMain) -> str:
+def render_quotation_preview(quotation: QuotationMain, instance: QuotationBpmInstance | None = None) -> str:
     """Render a cost-analysis worksheet from structured database fields only."""
     from app.database import SessionLocal
 
@@ -347,6 +440,23 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
     unit_usage_sum = quotation.unit_usage_sum
     if unit_usage_sum is None:
         unit_usage_sum = sum((_decimal(item.unit_usage) for item in materials), Decimal("0")) / Decimal("100")
+    display_analysis_date = instance.quote_date if instance and instance.quote_date else quotation.analysis_date
+    display_cost = instance.cost if instance and instance.cost is not None else quotation.cost
+    display_profit_price = (
+        instance.profit_selling_price
+        if instance and instance.profit_selling_price is not None
+        else quotation.profit_selling_price
+    )
+    display_non_profit_price = (
+        instance.non_profit_price
+        if instance and instance.non_profit_price is not None
+        else quotation.non_profit_price
+    )
+    display_final_price = (
+        instance.final_selling_price
+        if instance and instance.final_selling_price is not None
+        else quotation.final_selling_price
+    )
 
     material_rows = "".join(
         _row(
@@ -396,7 +506,7 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
                 _cell("收货地（市）:", css="label"),
                 _edit_cell(quotation.customer_address, "main", quotation.id, "customer_address", css="value left"),
                 _cell("分析日期:", css="label"),
-                _edit_cell(quotation.analysis_date, "main", quotation.id, "analysis_date", colspan=2, css="value"),
+                _edit_cell(display_analysis_date, "main", quotation.id, "analysis_date", colspan=2, css="value"),
             ),
             _row(
                 _cell("结构:", css="label"),
@@ -466,8 +576,8 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
                 _cell("报关费(RMB/次)", css="fee-label"),
                 _cell("增值税率", css="fee-label"),
                 _cell("订单米数", css="fee-label"),
-                _edit_cell(quotation.cost, "main", quotation.id, "cost", css="price-value number alert"),
-                _edit_cell(quotation.profit_selling_price, "main", quotation.id, "profit_selling_price", css="price-value featured number"),
+                _edit_cell(display_cost, "main", quotation.id, "cost", css="price-value number alert"),
+                _edit_cell(display_profit_price, "main", quotation.id, "profit_selling_price", css="price-value featured number"),
             ),
             _row(
                 _edit_cell(quotation.other_fee, "main", quotation.id, "other_fee", css="fee-value number"),
@@ -484,8 +594,8 @@ def render_quotation_preview(quotation: QuotationMain) -> str:
                 _cell("营业费用率", css="fee-label"),
                 _cell("月结利息", css="fee-label"),
                 _cell("企税税率", css="fee-label"),
-                _edit_cell(quotation.non_profit_price, "main", quotation.id, "non_profit_price", css="price-value number alert"),
-                _edit_cell(quotation.final_selling_price, "main", quotation.id, "final_selling_price", css="price-value featured number"),
+                _edit_cell(display_non_profit_price, "main", quotation.id, "non_profit_price", css="price-value number alert"),
+                _edit_cell(display_final_price, "main", quotation.id, "final_selling_price", css="price-value featured number"),
             ),
             _row(
                 _edit_cell(quotation.irradiation_core_count, "main", quotation.id, "irradiation_core_count", css="fee-value number"),

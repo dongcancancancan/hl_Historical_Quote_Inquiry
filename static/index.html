@@ -224,10 +224,12 @@
                         ? '<span class=\"text-xs text-gray-400 mr-1\" title=\"上传人\">' + escapeHtml(it.upload_user) + '</span>'
                         : '';
                     const encodedCode = encodeURIComponent(it.quotation_code);
+                    const instanceId = it.instance_id || '';
                     return '<div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50 group">' +
-                        '<button class="flex-1 min-w-0 text-left" title="' + escapeHtml(tooltip) + '" onclick="previewQuotation(decodeURIComponent(\'' + encodedCode + '\'))">' +
+                        '<button class="flex-1 min-w-0 text-left" title="' + escapeHtml(tooltip) + '" onclick="previewQuotation(decodeURIComponent(\'' + encodedCode + '\'), ' + (instanceId || 'null') + ')">' +
                             '<span class="text-xs font-mono text-gray-800 truncate block">' + escapeHtml(it.quotation_code) + '</span>' +
                             '<span class="text-xs font-mono text-blue-500 truncate block">' + escapeHtml(it.bpm_no || '-') + '</span>' +
+                            '<span class="text-xs text-gray-400 truncate block">报价日期：' + escapeHtml(it.quote_date || '-') + '</span>' +
                             '<span class="text-xs text-gray-400 truncate block">' + escapeHtml([it.customer_name, it.package_method, it.product_spec].filter(Boolean).join(' ')).substring(0, 24) + '</span>' +
                             '<span class="text-xs text-gray-400 truncate block">上传人：' + escapeHtml(it.upload_user || '-') + '</span>' +
                         '</button>' +
@@ -235,7 +237,7 @@
                             uploader +
                             '<span class="text-xs text-gray-400">' + time + '</span>' +
                             (it.review_status === 'quoted' ? '<span class="text-xs text-green-600">已报价</span>' :
-                            ((isAdmin || it.upload_user === displayName) ? '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this)" title="删除">✕</button>' : '')) +
+                            ((isAdmin || it.upload_user === displayName) ? '<button class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition text-xs" onclick="deleteQuotation(decodeURIComponent(\'' + encodedCode + '\'), this, ' + (instanceId || 'null') + ')" title="删除">✕</button>' : '')) +
                         '</div>' +
                     '</div>';
                 }).join('');
@@ -246,11 +248,13 @@
             }).join('');
         }
 
-        async function deleteQuotation(code, btnEl) {
+        async function deleteQuotation(code, btnEl, instanceId) {
             if (!confirm('确认删除成本分析号 ' + code + ' 吗？此操作不可撤销。')) return;
             btnEl.disabled = true;
             try {
-                const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(code), {
+                let query = 'code=' + encodeURIComponent(code);
+                if (instanceId) query += '&instance_id=' + encodeURIComponent(instanceId);
+                const res = await fetch('/api/v1/etl/quotation?' + query, {
                     method: 'DELETE',
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
@@ -266,14 +270,24 @@
         }
 
         let previewQuotationCode = '';
+        let previewInstanceId = null;
         let previewReviewStatus = 'pending';
 
-        async function previewQuotation(code) {
+        function previewQueryParams() {
+            let query = 'code=' + encodeURIComponent(previewQuotationCode || '');
+            if (previewInstanceId) query += '&instance_id=' + encodeURIComponent(previewInstanceId);
+            return query;
+        }
+
+        async function previewQuotation(code, instanceId) {
             const modal = document.getElementById('previewModal');
             const loading = document.getElementById('previewLoading');
             const frame = document.getElementById('previewFrame');
             previewQuotationCode = code;
-            previewReviewStatus = historyData.flatMap(group => group.items).find(item => item.quotation_code === code)?.review_status || 'pending';
+            if (instanceId !== undefined) previewInstanceId = instanceId ? Number(instanceId) : null;
+            previewReviewStatus = historyData.flatMap(group => group.items).find(item =>
+                previewInstanceId ? Number(item.instance_id) === Number(previewInstanceId) : item.quotation_code === code
+            )?.review_status || 'pending';
             document.getElementById('previewCode').textContent = code;
             modal.classList.remove('hidden');
             loading.classList.remove('hidden');
@@ -284,7 +298,7 @@
             document.getElementById('previewEditBtn').classList.toggle('hidden', previewReviewStatus === 'quoted');
 
             try {
-                const res = await fetch('/api/v1/etl/quotation/preview?code=' + encodeURIComponent(code), {
+                const res = await fetch('/api/v1/etl/quotation/preview?' + previewQueryParams(), {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '预览加载失败'); }
@@ -300,6 +314,7 @@
             document.getElementById('previewModal').classList.add('hidden');
             document.getElementById('previewFrame').removeAttribute('srcdoc');
             previewQuotationCode = '';
+            previewInstanceId = null;
             resetPreviewToolbar();
         }
 
@@ -322,7 +337,7 @@
         }
 
         function cancelPreviewEditing() {
-            if (previewQuotationCode) previewQuotation(previewQuotationCode);
+            if (previewQuotationCode) previewQuotation(previewQuotationCode, previewInstanceId);
         }
 
         async function savePreviewChanges() {
@@ -347,7 +362,7 @@
             saveBtn.disabled = true;
             status.textContent = '正在保存...';
             try {
-                const res = await fetch('/api/v1/etl/quotation?code=' + encodeURIComponent(previewQuotationCode), {
+                const res = await fetch('/api/v1/etl/quotation?' + previewQueryParams(), {
                     method: 'PATCH',
                     headers: {
                         'Authorization': 'Bearer ' + token,
@@ -360,7 +375,7 @@
                 previewQuotationCode = data.quotation_code;
                 document.getElementById('previewCode').textContent = previewQuotationCode;
                 await loadHistory();
-                await previewQuotation(previewQuotationCode);
+                await previewQuotation(previewQuotationCode, previewInstanceId);
                 document.getElementById('previewSaveStatus').textContent = '已保存';
             } catch (err) {
                 status.textContent = '保存失败';
@@ -375,7 +390,7 @@
             const btn = document.getElementById('previewExportBtn');
             btn.disabled = true;
             try {
-                const res = await fetch('/api/v1/etl/quotation/export?code=' + encodeURIComponent(previewQuotationCode), {
+                const res = await fetch('/api/v1/etl/quotation/export?' + previewQueryParams(), {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { const d = await res.json(); throw new Error(d.detail || '导出失败'); }
@@ -493,13 +508,26 @@
                     break;
                 }
 
+                case 'reused': {
+                    const list = document.getElementById('progressList');
+                    if (list) {
+                        const line = document.createElement('div');
+                        line.className = 'text-blue-600 font-mono';
+                        line.textContent = '↻ 复用: ' + event.quotation_code + ' — ' + (event.bpm_no || '') + ' 已登记';
+                        list.prepend(line);
+                    }
+                    break;
+                }
+
                 case 'skipped': {
                     const list = document.getElementById('progressList');
                     if (list) {
                         const isBatchDup = event.reason === 'batch_dup';
                         const icon = isBatchDup ? '⚠' : '⛔';
                         const colorClass = isBatchDup ? 'text-yellow-600' : 'text-orange-500';
-                        const label = isBatchDup ? '批次内重复' : '历史已存在';
+                        const label = event.reason === 'content_changed'
+                            ? '同号内容不一致'
+                            : (event.reason === 'quoted_instance' ? '已报价不覆盖' : (isBatchDup ? '批次内重复' : '历史已存在'));
                         const line = document.createElement('div');
                         line.className = colorClass + ' font-mono';
                         line.textContent = icon + ' 跳过: ' + event.quotation_code + ' — ' + label;
@@ -516,9 +544,11 @@
                     const line = document.createElement('div');
                     line.className = 'text-green-700 font-semibold text-lg mt-3 border-t pt-3';
                     line.textContent = '入库完成！成功 ' + event.processed + ' 个报价单';
+                    if (event.reused > 0) line.textContent += '，复用已有 ' + event.reused + ' 个';
                     if (event.llm_errors > 0) line.textContent += '，LLM 解析失败 ' + event.llm_errors + ' 个';
                     if (event.dup_within_batch > 0) line.textContent += '，批次内重复跳过 ' + event.dup_within_batch + ' 个';
                     if (event.db_duplicates > 0) line.textContent += '，已存在跳过 ' + event.db_duplicates + ' 个';
+                    if (event.content_conflicts > 0) line.textContent += '，同号内容不一致跳过 ' + event.content_conflicts + ' 个';
                     if (event.db_errors > 0) line.textContent += '，DB 写入失败 ' + event.db_errors + ' 个';
                     if (event.db_time !== undefined) line.textContent += '（DB 写入耗时 ' + event.db_time + 's）';
                     container.appendChild(line);

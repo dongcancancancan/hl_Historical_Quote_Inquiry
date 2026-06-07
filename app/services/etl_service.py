@@ -6,6 +6,7 @@ import json
 import shutil
 import asyncio
 import logging
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from openpyxl import load_workbook
@@ -16,9 +17,16 @@ from openai import AsyncOpenAI
 
 from app.models.calc_param import QuotationCalcParam
 from app.models.calculation_trace import QuotationCalculationTrace
-from app.models.quotation import QuotationMain, QuotationMaterial, QuotationProcessFee
+from app.models.quotation import QuotationBpmInstance, QuotationMain, QuotationMaterial, QuotationProcessFee
 from app.models.user import User
 from app.core.config import settings
+from app.services.bpm_instance_service import (
+    REVIEW_PENDING,
+    REVIEW_QUOTED,
+    ensure_bpm_instance,
+    get_existing_quotation,
+    normalize_bpm_no,
+)
 from app.services.quotation_summary_service import apply_quotation_summaries
 
 logger = logging.getLogger(__name__)
@@ -259,13 +267,45 @@ def _compact_cell_text(val) -> str:
     return re.sub(r"\s+", "", str(val)).strip()
 
 
+def _block_content_hash(block: QuotationBlock | None) -> str:
+    if not block:
+        return ""
+    text_value = "\n".join([block.header_text or "", block.table_text or ""])
+    text_value = re.sub(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", "", text_value)
+    text_value = re.sub(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", "", text_value)
+    text_value = re.sub(r"\s+", "", text_value).upper()
+    return hashlib.sha256(text_value.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _parse_date_value(value):
+    if not value:
+        return None
+    if hasattr(value, "date"):
+        try:
+            return value.date()
+        except Exception:
+            pass
+    text_value = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text_value, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _quick_header_from_excel(saved_path: str, block: QuotationBlock) -> dict:
+    data = _patch_header_fields_from_excel({}, saved_path, block)
+    return data if isinstance(data, dict) else {}
+
+
 def _patch_header_fields_from_excel(data: dict, file_path: str, block: QuotationBlock | None) -> dict:
     """Patch header metadata from the uploaded workbook using template labels.
 
     This keeps new-template fields deterministic and avoids depending only on LLM
     interpretation for short labels such as "收货地（市）" and "包装方式-米数".
     """
-    if not data or not file_path or not block:
+    if data is None or not file_path or not block:
         return data
 
     ext = os.path.splitext(file_path)[1].lower()
@@ -701,6 +741,7 @@ def _write_one_quotation(
     saved_path: str,
     display_name: str = "",
     bpm_no: str = "",
+    content_hash: str = "",
 ) -> str:
     """将单条 LLM 提取结果写入数据库，返回 quotation_code。
     如果成本分析号已存在则跳过，返回空字符串。"""
@@ -709,7 +750,20 @@ def _write_one_quotation(
     product_spec = data.get("product_spec") or ""
 
     # 唯一性校验：同租户下已存在则跳过
-    if _quotation_exists(db, quotation_code, tenant_id):
+    existing = get_existing_quotation(db, tenant_id, quotation_code)
+    if existing:
+        ensure_bpm_instance(
+            db,
+            existing,
+            bpm_no,
+            _parse_date_value(data.get("date_val")) or existing.analysis_date,
+            creator_name,
+            saved_path,
+        )
+        if content_hash and not getattr(existing, "content_hash", None):
+            existing.content_hash = content_hash
+        existing.updater = creator_name
+        existing.update_time = datetime.now()
         logger.info(f"[{quotation_code}] 成本分析号已存在，跳过")
         return ""
 
@@ -736,7 +790,7 @@ def _write_one_quotation(
     new_main = QuotationMain(
         tenant_id=tenant_id,
         quotation_code=quotation_code,
-        bpm_no=bpm_no,
+        bpm_no=normalize_bpm_no(bpm_no),
         customer_name=data.get("customer") or "",
         customer_address=data.get("address") or "",
         package_method=data.get("package_method") or "",
@@ -745,6 +799,7 @@ def _write_one_quotation(
         product_spec=product_spec,
         remark=data.get("remark") or "",
         original_file_path=saved_path,
+        content_hash=content_hash or "",
         extracted_tags=extracted_tags,
         unit_usage_sum=None,
         material_amount_sum=_safe_numeric(cost_data.get("total_material_amount")),
@@ -819,6 +874,7 @@ def _write_one_quotation(
         db.add(process_row)
 
     apply_quotation_summaries(new_main, material_rows, process_rows)
+    ensure_bpm_instance(db, new_main, bpm_no, parsed_date, creator_name, saved_path)
 
     return quotation_code
 
@@ -839,12 +895,86 @@ async def process_excel_streaming(
         yield {"event": "complete", "processed": 0, "errors": 0}
         return
 
-    # --- 阶段2: 并行 LLM 提取 ---
+    # --- 阶段2: LLM 前预检。已存在的成本分析表只新增 BPM 实例，避免重复消耗 token。 ---
+    creator_name = display_name or username
+    bpm_no = normalize_bpm_no(bpm_no)
+    llm_blocks: list[dict] = []
+    reused_count = 0
+    preflight_skipped = 0
+    content_conflicts = 0
+
+    for index, block in enumerate(blocks):
+        quick_data = _quick_header_from_excel(saved_path, block)
+        quick_code = (quick_data.get("quotation_no") or "").strip()
+        content_hash = _block_content_hash(block)
+        quote_date = _parse_date_value(quick_data.get("date_val"))
+        if quick_code:
+            existing = get_existing_quotation(db, tenant_id, quick_code)
+            if existing:
+                if getattr(existing, "content_hash", None) and content_hash and existing.content_hash != content_hash:
+                    preflight_skipped += 1
+                    content_conflicts += 1
+                    yield {
+                        "event": "skipped",
+                        "quotation_code": quick_code,
+                        "reason": "content_changed",
+                        "message": f"同一成本分析号 {quick_code} 的表格内容与历史记录不一致，已跳过以避免覆盖旧数据",
+                    }
+                    continue
+                try:
+                    instance = ensure_bpm_instance(db, existing, bpm_no, quote_date or existing.analysis_date, creator_name, saved_path)
+                except ValueError as exc:
+                    preflight_skipped += 1
+                    yield {
+                        "event": "skipped",
+                        "quotation_code": quick_code,
+                        "reason": "quoted_instance",
+                        "message": str(exc),
+                    }
+                    continue
+                if content_hash and not getattr(existing, "content_hash", None):
+                    existing.content_hash = content_hash
+                db.flush()
+                reused_count += 1
+                yield {
+                    "event": "reused",
+                    "quotation_code": quick_code,
+                    "bpm_no": bpm_no,
+                    "instance_id": instance.id,
+                    "message": f"复用已有成本分析表 {quick_code}，已登记 BPM流程号 {bpm_no}",
+                }
+                continue
+
+        llm_blocks.append({
+            "index": index,
+            "block": block,
+            "quick_data": quick_data,
+            "content_hash": content_hash,
+        })
+
+    if reused_count or preflight_skipped:
+        db.commit()
+
+    if not llm_blocks:
+        yield {
+            "event": "complete",
+            "processed": 0,
+            "reused": reused_count,
+            "total": total,
+            "llm_errors": 0,
+            "dup_within_batch": 0,
+            "db_duplicates": 0,
+            "content_conflicts": content_conflicts,
+            "db_time": 0,
+        }
+        return
+
+    # --- 阶段3: 并行 LLM 提取 ---
     semaphore = asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)
     results: list[dict] = []
     tasks: list[asyncio.Task] = []
 
-    async def process_one(index: int, block: QuotationBlock):
+    async def process_one(index: int, block: QuotationBlock, quick_data: dict, content_hash: str):
         t0 = time.time()
         try:
             data = await _extract_one_async(block, semaphore)
@@ -858,6 +988,8 @@ async def process_excel_streaming(
                 "error": None,
                 "quotation_code": code,
                 "llm_time": round(t_llm, 1),
+                "quick_data": quick_data,
+                "content_hash": content_hash,
             }
         except asyncio.CancelledError:
             logger.info(f"[Block {index}] LLM 任务被取消（客户端断开）")
@@ -872,10 +1004,15 @@ async def process_excel_streaming(
                 "error": str(e),
                 "quotation_code": block.preview[:50],
                 "llm_time": round(t_llm, 1),
+                "quick_data": quick_data,
+                "content_hash": content_hash,
             }
 
     try:
-        tasks = [asyncio.create_task(process_one(i, block)) for i, block in enumerate(blocks)]
+        tasks = [
+            asyncio.create_task(process_one(item["index"], item["block"], item["quick_data"], item["content_hash"]))
+            for item in llm_blocks
+        ]
 
         completed = 0
         errors = 0
@@ -888,7 +1025,7 @@ async def process_excel_streaming(
             yield {
                 "event": "progress",
                 "current": completed,
-                "total": total,
+                "total": len(llm_blocks),
                 "quotation_code": result["quotation_code"],
                 "llm_time": result["llm_time"],
                 "error": result["error"],
@@ -930,6 +1067,7 @@ async def process_excel_streaming(
         t_db_start = time.time()
         db_success = 0
         db_duplicates = 0
+        db_errors = 0
 
         for r in deduped_results:
             if r["data"] is None or r.get("dup_skipped"):
@@ -937,39 +1075,80 @@ async def process_excel_streaming(
             try:
                 data = _patch_header_fields_from_excel(r["data"], saved_path, r.get("block"))
                 data = _patch_cost_summary_from_excel(data, saved_path, r.get("block"))
-                code = _write_one_quotation(db, data, tenant_id, username, saved_path, display_name, bpm_no)
+                final_code = (data.get("quotation_no") or r.get("quotation_code") or "").strip()
+                content_hash = r.get("content_hash") or _block_content_hash(r.get("block"))
+                existing = get_existing_quotation(db, tenant_id, final_code) if final_code else None
+                if existing and getattr(existing, "content_hash", None) and content_hash and existing.content_hash != content_hash:
+                    content_conflicts += 1
+                    logger.warning(f"[{final_code}] 同号内容与历史不一致，跳过")
+                    yield {
+                        "event": "skipped",
+                        "quotation_code": final_code,
+                        "reason": "content_changed",
+                        "message": f"同一成本分析号 {final_code} 的表格内容与历史记录不一致，已跳过以避免覆盖旧数据",
+                    }
+                    continue
+                code = _write_one_quotation(
+                    db,
+                    data,
+                    tenant_id,
+                    username,
+                    saved_path,
+                    display_name,
+                    bpm_no,
+                    content_hash=content_hash,
+                )
                 if code:
                     db_success += 1
                     logger.info(f"[{code}] DB 写入完成")
                 else:
                     db_duplicates += 1
-                    logger.info(f"[{r['quotation_code']}] DB 中已存在，跳过")
+                    reused_count += 1
+                    logger.info(f"[{r['quotation_code']}] DB 中已存在，复用并登记 BPM 实例")
+                    yield {
+                        "event": "reused",
+                        "quotation_code": r["quotation_code"],
+                        "bpm_no": bpm_no,
+                        "message": f"复用已有成本分析表 {r['quotation_code']}，已登记 BPM流程号 {bpm_no}",
+                    }
+            except ValueError as e:
+                if "已报价" in str(e):
+                    logger.warning(f"[{r['quotation_code']}] 已报价实例不允许覆盖: {e}")
+                    db.rollback()
                     yield {
                         "event": "skipped",
                         "quotation_code": r["quotation_code"],
-                        "reason": "db_dup",
-                        "message": f"历史重复：成本分析号 {r['quotation_code']} 已在数据库中，跳过",
+                        "reason": "quoted_instance",
+                        "message": str(e),
                     }
+                    continue
+                logger.error(f"[{r['quotation_code']}] DB 写入失败: {e}")
+                db.rollback()
+                db_errors += 1
             except Exception as e:
                 logger.error(f"[{r['quotation_code']}] DB 写入失败: {e}")
                 db.rollback()
+                db_errors += 1
 
         db.commit()
         t_db = time.time() - t_db_start
 
-        total_skipped = dup_within_batch + db_duplicates
+        total_skipped = dup_within_batch + content_conflicts
         logger.info(
             f"全部完成: LLM={completed}个 DB写入={db_success}个 "
-            f"跳过={total_skipped}个(批内重复{dup_within_batch}/DB已存在{db_duplicates}) "
+            f"复用={reused_count}个 跳过={total_skipped}个(批内重复{dup_within_batch}/内容冲突{content_conflicts}) "
             f"DB耗时={t_db:.1f}s"
         )
         yield {
             "event": "complete",
             "processed": db_success,
+            "reused": reused_count,
             "total": total,
             "llm_errors": errors,
             "dup_within_batch": dup_within_batch,
             "db_duplicates": db_duplicates,
+            "content_conflicts": content_conflicts,
+            "db_errors": db_errors,
             "db_time": round(t_db, 1),
         }
 
@@ -1002,6 +1181,8 @@ def get_upload_history(
 
     filters = [
         QuotationMain.deleted == False,
+        QuotationBpmInstance.deleted == False,
+        QuotationBpmInstance.review_status != REVIEW_QUOTED,
     ]
     if not is_admin:
         filters.append(or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)))
@@ -1013,6 +1194,7 @@ def get_upload_history(
         filters.append(or_(
             QuotationMain.quotation_code.contains(search),
             QuotationMain.bpm_no.contains(search),
+            QuotationBpmInstance.bpm_no.contains(search),
             QuotationMain.customer_name.contains(search),
             QuotationMain.customer_address.contains(search),
             QuotationMain.package_method.contains(search),
@@ -1020,6 +1202,69 @@ def get_upload_history(
         ))
 
     rows = (
+        db.query(
+            QuotationMain.id,
+            QuotationBpmInstance.id,
+            QuotationMain.quotation_code,
+            QuotationBpmInstance.bpm_no,
+            QuotationMain.customer_name,
+            QuotationMain.package_method,
+            QuotationMain.product_spec,
+            QuotationBpmInstance.upload_user,
+            func.cast(QuotationBpmInstance.upload_time, Date).label("create_date"),
+            QuotationBpmInstance.upload_time,
+            QuotationBpmInstance.source_file_path,
+            QuotationBpmInstance.review_status,
+            QuotationBpmInstance.quote_date,
+        )
+        .join(QuotationMain, QuotationMain.id == QuotationBpmInstance.quotation_main_id)
+        .filter(*filters)
+        .order_by(QuotationBpmInstance.upload_time.desc(), QuotationBpmInstance.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    # 按日期分组
+    from collections import OrderedDict
+    groups = OrderedDict()
+    instance_main_ids = set()
+    for main_id, instance_id, code, bpm_no, customer, package_method, spec, creator, create_date, create_time, path, review_status, quote_date in rows:
+        instance_main_ids.add(main_id)
+        date_key = str(create_date) if create_date else "未知日期"
+        if date_key not in groups:
+            groups[date_key] = []
+        groups[date_key].append({
+            "instance_id": instance_id,
+            "quotation_code": code,
+            "bpm_no": bpm_no or "",
+            "customer_name": customer or "",
+            "package_method": package_method or "",
+            "product_spec": spec or "",
+            "upload_user": creator or "",
+            "create_time": create_time.isoformat() if create_time else None,
+            "quote_date": quote_date.isoformat() if quote_date else None,
+            "filename": os.path.basename(path) if path else "",
+            "review_status": review_status,
+        })
+
+    legacy_filters = [QuotationMain.deleted == False]
+    if instance_main_ids:
+        legacy_filters.append(QuotationMain.id.notin_(instance_main_ids))
+    if not is_admin:
+        legacy_filters.append(or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)))
+        admin_names = _admin_creator_names(db, tenant_id)
+        if admin_names:
+            legacy_filters.append(QuotationMain.creator.notin_(admin_names))
+    if search:
+        legacy_filters.append(or_(
+            QuotationMain.quotation_code.contains(search),
+            QuotationMain.bpm_no.contains(search),
+            QuotationMain.customer_name.contains(search),
+            QuotationMain.customer_address.contains(search),
+            QuotationMain.package_method.contains(search),
+            QuotationMain.product_spec.contains(search),
+        ))
+    legacy_rows = (
         db.query(
             QuotationMain.quotation_code,
             QuotationMain.bpm_no,
@@ -1031,18 +1276,16 @@ def get_upload_history(
             QuotationMain.create_time,
             QuotationMain.original_file_path,
             QuotationMain.extracted_tags,
+            QuotationMain.analysis_date,
         )
-        .filter(*filters)
+        .filter(*legacy_filters)
         .order_by(QuotationMain.create_time.desc())
         .limit(limit)
         .all()
     )
+    for code, bpm_no, customer, package_method, spec, creator, create_date, create_time, path, extracted_tags, quote_date in legacy_rows:
+        from app.services.excel_preview_service import get_review_status_from_tags
 
-    # 按日期分组
-    from collections import OrderedDict
-    groups = OrderedDict()
-    for code, bpm_no, customer, package_method, spec, creator, create_date, create_time, path, extracted_tags in rows:
-        from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status_from_tags
         review_status = get_review_status_from_tags(extracted_tags)
         if review_status == REVIEW_QUOTED:
             continue
@@ -1050,6 +1293,7 @@ def get_upload_history(
         if date_key not in groups:
             groups[date_key] = []
         groups[date_key].append({
+            "instance_id": None,
             "quotation_code": code,
             "bpm_no": bpm_no or "",
             "customer_name": customer or "",
@@ -1057,6 +1301,7 @@ def get_upload_history(
             "product_spec": spec or "",
             "upload_user": creator or "",
             "create_time": create_time.isoformat() if create_time else None,
+            "quote_date": quote_date.isoformat() if quote_date else None,
             "filename": os.path.basename(path) if path else "",
             "review_status": review_status,
         })
@@ -1074,9 +1319,50 @@ def delete_quotation(
     creator_name: str,
     is_admin: bool = False,
     is_reviewer: bool = False,
+    instance_id: int | None = None,
 ) -> bool:
     """删除指定成本分析号（管理员可删任意，普通用户仅可删自己），返回是否成功"""
     from sqlalchemy import or_
+
+    if instance_id:
+        query = (
+            db.query(QuotationBpmInstance, QuotationMain)
+            .join(QuotationMain, QuotationMain.id == QuotationBpmInstance.quotation_main_id)
+            .filter(
+                QuotationBpmInstance.id == instance_id,
+                QuotationBpmInstance.deleted == False,
+                QuotationMain.deleted == False,
+            )
+        )
+        if not is_admin and not is_reviewer:
+            query = query.filter(
+                or_(QuotationMain.tenant_id == tenant_id, QuotationMain.tenant_id.is_(None)),
+                QuotationBpmInstance.upload_user == creator_name,
+            )
+        row = query.first()
+        if not row:
+            return False
+        instance, q = row
+        if instance.review_status == REVIEW_QUOTED:
+            return False
+        instance.deleted = True
+        instance.updater = creator_name
+        instance.update_time = datetime.now()
+        remaining = (
+            db.query(QuotationBpmInstance)
+            .filter(
+                QuotationBpmInstance.quotation_main_id == q.id,
+                QuotationBpmInstance.deleted == False,
+                QuotationBpmInstance.id != instance.id,
+            )
+            .count()
+        )
+        if remaining == 0:
+            _delete_quotation_fk_children(db, q.id)
+            db.delete(q)
+        db.commit()
+        logger.info(f"[{quotation_code}] BPM实例 {instance_id} 已由 {creator_name} 删除 (admin={is_admin})")
+        return True
 
     filters = [
         QuotationMain.quotation_code == quotation_code,
@@ -1133,7 +1419,15 @@ def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, usern
             t1 = time.time()
             data = _patch_header_fields_from_excel(data, saved_path, block)
             data = _patch_cost_summary_from_excel(data, saved_path, block)
-            quotation_code = _write_one_quotation(db, data, tenant_id, username, saved_path, bpm_no=bpm_no)
+            quotation_code = _write_one_quotation(
+                db,
+                data,
+                tenant_id,
+                username,
+                saved_path,
+                bpm_no=bpm_no,
+                content_hash=_block_content_hash(block),
+            )
             t_db = time.time() - t1
 
             if quotation_code:

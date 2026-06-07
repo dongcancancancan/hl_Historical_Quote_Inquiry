@@ -21,6 +21,7 @@ class QuotationMain(Base):
     product_spec = Column(String(500), index=True, comment="品名规格")
     quotation_name = Column(String(100), comment="报价单名称")
     original_file_path = Column(String(500), comment="原始Excel文件存储路径")
+    content_hash = Column(String(64), index=True, comment="成本分析内容指纹（用于同表复用）")
     extracted_tags = Column(String, comment="提取的业务标签JSON (料号、线径等)")
     remark = Column(String(500), comment="备注")
 
@@ -67,6 +68,38 @@ class QuotationMain(Base):
     # 关联子表
     materials = relationship("QuotationMaterial", back_populates="main", cascade="all, delete-orphan")
     processes = relationship("QuotationProcessFee", back_populates="main", cascade="all, delete-orphan")
+    bpm_instances = relationship("QuotationBpmInstance", back_populates="main", cascade="all, delete-orphan")
+
+
+class QuotationBpmInstance(Base):
+    """一次 BPM 询价实例。同一张成本分析表可以被多个 BPM 流程复用。"""
+    __tablename__ = "quotation_bpm_instance"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(50), index=True, comment="租户ID")
+    quotation_main_id = Column(Integer, ForeignKey("quotation_main.id"), nullable=False, index=True, comment="关联成本分析表ID")
+    quotation_code = Column(String(100), nullable=False, index=True, comment="成本分析号快照")
+    bpm_no = Column(String(100), nullable=False, index=True, comment="BPM流程号")
+    quote_date = Column(Date, index=True, comment="本次BPM报价/分析日期")
+    source_file_path = Column(String(500), comment="本次上传来源文件")
+    upload_user = Column(String(64), index=True, comment="上传人")
+    upload_time = Column(DateTime, nullable=False, server_default=func.now(), comment="上传时间")
+    review_status = Column(String(20), nullable=False, default="pending", index=True, comment="审价状态 pending/quoted")
+    copper_price = Column(Numeric(18, 4), comment="本次审价铜价")
+    copper_rod_process_fee = Column(Numeric(18, 4), comment="本次审价铜杆加工费")
+    vat_rate = Column(Numeric(18, 4), comment="本次导体计算增值税率")
+    cost = Column(Numeric(18, 4), comment="本次计算成本")
+    profit_selling_price = Column(Numeric(18, 4), comment="本次计算取利售价")
+    non_profit_price = Column(Numeric(18, 4), comment="本次计算不取利售价")
+    final_selling_price = Column(Numeric(18, 4), comment="本次最终售价")
+    quoted_time = Column(DateTime, comment="标记已报价时间")
+    creator = Column(String(64), comment="创建人")
+    create_time = Column(DateTime, nullable=False, server_default=func.now(), comment="创建时间")
+    updater = Column(String(64), comment="更新人")
+    update_time = Column(DateTime, nullable=False, server_default=func.now(), comment="更新时间")
+    deleted = Column(Boolean, nullable=False, default=False, comment="软删除标记")
+
+    main = relationship("QuotationMain", back_populates="bpm_instances")
 
 
 class QuotationMaterial(Base):
