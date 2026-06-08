@@ -1008,7 +1008,7 @@ def _is_core_conductor_row(item: QuotationMaterial) -> bool:
         and (
             "铜" in name
             or "导体" in name
-            or bool(re.search(r"(\d+(?:\.\d+)?)\s*(BC|TC)", f"{item.process_code or ''} {item.spec_detail or ''}", re.IGNORECASE))
+            or bool(re.search(r"(\d+(?:\.\d+)?)\s*(BC|TC|TD)", f"{item.process_code or ''} {item.spec_detail or ''}", re.IGNORECASE))
         )
     )
 

@@ -15,7 +15,7 @@ from app.services.excel_preview_service import get_review_status, REVIEW_QUOTED
 from app.services.unit_price_override_service import apply_unit_price_overrides, has_unit_price_override, load_unit_price_overrides
 
 
-COPPER_CODE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(BC|TC)", re.IGNORECASE)
+COPPER_CODE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(BC|TC|TD)", re.IGNORECASE)
 
 
 def calculate_conductor_materials(
@@ -75,7 +75,7 @@ def calculate_conductor_materials(
         else:
             parsed = _parse_copper_code(item)
             if not parsed:
-                skipped.append({"id": item.id, "reason": "未从物料编码或规格中解析到 BC/TC 线径，可手填单价后重新计算"})
+                skipped.append({"id": item.id, "reason": "未从物料编码或规格中解析到 BC/TC/TD 线径，可手填单价后重新计算"})
                 continue
             fee = _match_copper_fee(db, parsed["copper_type"], parsed["diameter"], operator=operator, auto_create=True)
             if not fee:
@@ -352,10 +352,13 @@ def _parse_copper_code(item: QuotationMaterial) -> dict | None:
     for field_name, value in (("物料编码", item.process_code), ("规格", item.spec_detail)):
         match = COPPER_CODE_RE.search(str(value or ""))
         if match:
+            copper_type = match.group(2).upper()
+            if copper_type == "TD":
+                copper_type = "TC"  # TD 视为 TC
             return {
                 "diameter": Decimal(match.group(1)),
-                "copper_type": match.group(2).upper(),
-                "matched_code": f"{match.group(1)}{match.group(2).upper()}",
+                "copper_type": copper_type,
+                "matched_code": f"{match.group(1)}{copper_type}",
                 "source_field": field_name,
             }
     return None

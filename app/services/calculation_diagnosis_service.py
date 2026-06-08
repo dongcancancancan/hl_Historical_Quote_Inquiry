@@ -166,8 +166,8 @@ def _build_rule_summary(context: dict) -> str:
         lines.append("一键计算是事务链：前面阶段即使已算出结果，只要后续阶段失败也会整体回滚。因此诊断应以“当前错误”里的失败阶段和缺失价格来源为准，不能仅凭页面单价为空判断前面阶段未解析。")
     if "未在 PVC 母料 BOM" in error or "v_qs_bzcb" in error:
         lines.append("存在材料未命中 PVC BOM 或外购价格视图。处理方式：维护基础价格/BOM，或在单价格子手填单价并保存后重算。")
-    if "铜加工费" in error or "BC/TC" in error:
-        lines.append("存在导体/编织取价问题。检查物料编码或规格中是否包含正确的 BC/TC 线径，或检查铜加工费基础数据。")
+    if "铜加工费" in error or "BC/TC" in error or "BC/TD" in error:
+        lines.append("存在导体/编织取价问题。检查物料编码或规格中是否包含正确的 BC/TC/TD 线径，或检查铜加工费基础数据。")
     if "订单米数" in error:
         lines.append("最终售价公式需要订单米数大于 0，请检查底部订单米数字段。")
 
@@ -222,7 +222,7 @@ def _material_text(item: dict) -> str:
 
 def _recognition_text(item) -> str:
     text = f"{item.process_code or ''} {item.spec_detail or ''}".upper()
-    conductor = re.search(r"\d+(?:\.\d+)?\s*(BC|TC)", text)
+    conductor = re.search(r"\d+(?:\.\d+)?\s*(BC|TC|TD)", text)
     c_codes = re.findall(r"\b(C[A-Z0-9*]{3,})\b", text)
     parts = []
     if conductor:
@@ -234,7 +234,7 @@ def _recognition_text(item) -> str:
 
 def _looks_like_conductor_material(item: dict) -> bool:
     text = f"{item.get('制程') or ''} {item.get('规格') or ''} {item.get('物料编码') or ''}".upper()
-    return any(keyword in text for keyword in ("铜", "导体", "编织")) or bool(re.search(r"\d+(?:\.\d+)?\s*(BC|TC)", text))
+    return any(keyword in text for keyword in ("铜", "导体", "编织")) or bool(re.search(r"\d+(?:\.\d+)?\s*(BC|TC|TD)", text))
 
 
 def _price_label(item: dict) -> str:

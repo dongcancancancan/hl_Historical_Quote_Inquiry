@@ -10,17 +10,20 @@ from app.models.copper_fee import CopperProcessingFee, CopperProcessingFeeLog
 
 
 DEFAULT_TC_TIN_PRICE_BASIS = Decimal("350")
-COPPER_CODE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(BC|TC)\s*$", re.IGNORECASE)
+COPPER_CODE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(BC|TC|TD)\s*$", re.IGNORECASE)
 
 
 def normalize_copper_type(value: str) -> str:
     copper_type = (value or "").strip().upper()
+    if copper_type == "TD":
+        copper_type = "TC"  # TD 视为 TC（镀锡铜）
     if copper_type not in {"BC", "TC"}:
-        raise ValueError("铜类型仅支持 BC 或 TC")
+        raise ValueError("铜类型仅支持 BC、TC 或 TD")
     return copper_type
 
 
 def normalize_tin_price_basis(copper_type: str, value=None) -> Decimal:
+    # TD 已归一化为 TC，这里按 TC 处理
     if copper_type == "BC":
         return Decimal("0")
     if value in (None, ""):
@@ -31,8 +34,10 @@ def normalize_tin_price_basis(copper_type: str, value=None) -> Decimal:
 def parse_copper_material_code(material_code: str) -> dict:
     match = COPPER_CODE_RE.match(material_code or "")
     if not match:
-        raise ValueError("物料编码格式应为线径加 BC/TC，例如 0.196BC")
+        raise ValueError("物料编码格式应为线径加 BC/TC/TD，例如 0.196BC")
     copper_type = match.group(2).upper()
+    if copper_type == "TD":
+        copper_type = "TC"
     return {
         "diameter": Decimal(match.group(1)),
         "copper_type": copper_type,

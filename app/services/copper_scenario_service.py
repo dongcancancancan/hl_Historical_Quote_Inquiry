@@ -123,7 +123,7 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
     for item in conductor_rows:
         parsed = _parse_copper_code(item)
         if not parsed:
-            raise ValueError(f"{item.process_name or item.id} 未解析到 BC/TC 线径")
+            raise ValueError(f"{item.process_name or item.id} 未解析到 BC/TC/TD 线径")
         fee = _match_copper_fee(db, parsed["copper_type"], parsed["diameter"])
         if not fee:
             raise ValueError(f"铜加工费未维护：{parsed['diameter']}{parsed['copper_type']}")
