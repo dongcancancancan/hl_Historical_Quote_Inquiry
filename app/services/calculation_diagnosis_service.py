@@ -171,7 +171,7 @@ def _build_rule_summary(context: dict) -> str:
         lines.append(f"发现部分材料行没有物料编码且没有有效单价：{sample}。这类行通常需要补料号、维护价格或手填单价。")
 
     process_names = {item.get("process_name") for item in processes if item.get("process_name")}
-    known_keywords = ("铜", "导体", "编织", "绝缘", "芯押", "外被", "护套", "倒线", "集合")
+    known_keywords = ("铜", "导体", "编织", "绝缘", "芯押", "外被", "护套", "外护", "包带", "倒线", "集合")
     unknown_processes = [name for name in process_names if not any(key in name for key in known_keywords)]
     if unknown_processes:
         lines.append("发现可能尚未 Skill 化的制程费用行：" + "、".join(sorted(unknown_processes)[:8]) + "。需要确认公式后新增 Skill 或匹配规则。")

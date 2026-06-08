@@ -20,6 +20,7 @@ from app.services.glue_calc_service import (
     _is_core_twist_row,
     _is_insulation_row,
     _is_jacket_row,
+    _is_package_tape_process,
     _is_rewind_process,
     _match_insulation_process_fee_row,
     _match_jacket_process_fee_row,
@@ -172,6 +173,20 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
             _decimal(process.startup_loss_wire) * all_material_amount
             + _decimal(process.total_waste_glue) * jacket_unit_price
         )
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
+
+    jacket_amount = _round4(sum(
+        material_amounts.get(item.id, _decimal(item.material_amount))
+        for item in quotation.materials
+        if not item.deleted and _is_jacket_row(item)
+    ))
+    package_base_amount = _round4(all_material_amount - jacket_amount)
+    for process in [row for row in quotation.processes if not row.deleted and _is_package_tape_process(row)]:
+        if package_base_amount <= 0:
+            continue
+        process_amount = _round4(_decimal(process.startup_loss_wire) * package_base_amount)
         process_subtotals[process.id] = _round4(
             _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
         )

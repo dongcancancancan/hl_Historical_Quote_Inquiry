@@ -15,7 +15,16 @@ from app.services.unit_price_override_service import apply_unit_price_overrides,
 
 
 PVC_CODE_RE = re.compile(r"\b(C[A-Z0-9*]{3,})\b", re.IGNORECASE)
-GLUE_CALC_TYPES = ["glue", "external_material", "manual_material", "insulation", "jacket", "rewind", "collection"]
+GLUE_CALC_TYPES = [
+    "glue",
+    "external_material",
+    "manual_material",
+    "insulation",
+    "jacket",
+    "package_tape",
+    "rewind",
+    "collection",
+]
 
 
 def calculate_glue_materials(
@@ -42,10 +51,11 @@ def calculate_glue_materials(
             or item.id in unit_price_overrides
         )
     ]
+    package_tape_processes = [item for item in quotation.processes if not item.deleted and _is_package_tape_process(item)]
     rewind_processes = [item for item in quotation.processes if not item.deleted and _is_rewind_process(item)]
     collection_processes = [item for item in quotation.processes if not item.deleted and _is_collection_process(item)]
-    if not candidates and not rewind_processes and not collection_processes:
-        raise ValueError("未找到可计算的 C 开头胶料、外购物料、外被、倒线或集合制程行")
+    if not candidates and not package_tape_processes and not rewind_processes and not collection_processes:
+        raise ValueError("未找到可计算的 C 开头胶料、外购物料、外被、包带、倒线或集合制程行")
 
     calculated = 0
     c_calculated = 0
@@ -54,6 +64,7 @@ def calculate_glue_materials(
     color_masterbatch_calculated = 0
     insulation_process_calculated = 0
     jacket_process_calculated = 0
+    package_tape_process_calculated = 0
     rewind_process_calculated = 0
     collection_process_calculated = 0
     skipped = []
@@ -63,6 +74,7 @@ def calculate_glue_materials(
     db.query(QuotationCalculationTrace).filter(
         QuotationCalculationTrace.quotation_main_id == quotation.id,
         QuotationCalculationTrace.calc_type.in_(GLUE_CALC_TYPES),
+        QuotationCalculationTrace.run_id.is_(None),
     ).delete(synchronize_session=False)
 
     for item in candidates:
@@ -134,6 +146,13 @@ def calculate_glue_materials(
         elif error:
             hard_errors.append(error)
 
+    for process in package_tape_processes:
+        ok, error = _calculate_package_tape_process_fee(db, quotation, process, operator, now, ctx)
+        if ok:
+            package_tape_process_calculated += 1
+        elif error:
+            hard_errors.append(error)
+
     for process in rewind_processes:
         ok, error = _calculate_rewind_process_fee(db, quotation, process, operator, now, ctx)
         if ok:
@@ -152,10 +171,11 @@ def calculate_glue_materials(
         calculated == 0
         and insulation_process_calculated == 0
         and jacket_process_calculated == 0
+        and package_tape_process_calculated == 0
         and rewind_process_calculated == 0
         and collection_process_calculated == 0
     ):
-        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、倒线或集合制程行"
+        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、包带、倒线或集合制程行"
         raise ValueError(message)
     if hard_errors:
         skipped_messages = [item["reason"] for item in skipped]
@@ -177,31 +197,44 @@ def calculate_glue_materials(
         "color_masterbatch_calculated": color_masterbatch_calculated,
         "insulation_process_calculated": insulation_process_calculated,
         "jacket_process_calculated": jacket_process_calculated,
+        "package_tape_process_calculated": package_tape_process_calculated,
         "rewind_process_calculated": rewind_process_calculated,
         "collection_process_calculated": collection_process_calculated,
         "skipped": skipped,
     }
 
 
-def list_glue_traces(db: Session, quotation: QuotationMain) -> list[dict]:
-    rows = (
-        db.query(QuotationCalculationTrace)
-        .filter(
-            QuotationCalculationTrace.quotation_main_id == quotation.id,
-            QuotationCalculationTrace.calc_type.in_(GLUE_CALC_TYPES),
-        )
-        .order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc())
-        .limit(300)
-        .all()
+def list_glue_traces(
+    db: Session,
+    quotation: QuotationMain,
+    bpm_instance_id: int | None = None,
+    run_id: int | None = None,
+) -> list[dict]:
+    query = db.query(QuotationCalculationTrace).filter(
+        QuotationCalculationTrace.quotation_main_id == quotation.id,
+        QuotationCalculationTrace.calc_type.in_(GLUE_CALC_TYPES),
     )
+    if run_id:
+        query = query.filter(QuotationCalculationTrace.run_id == run_id)
+    elif bpm_instance_id:
+        query = query.filter(QuotationCalculationTrace.bpm_instance_id == bpm_instance_id)
+    rows = query.order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc()).limit(300).all()
     return [
         {
             "id": row.id,
+            "run_id": row.run_id,
+            "bpm_instance_id": row.bpm_instance_id,
             "material_id": row.material_id,
+            "entity_type": row.entity_type or "",
+            "entity_id": row.entity_id,
             "calc_type": row.calc_type,
             "field_name": row.field_name,
+            "display_label": row.display_label or "",
+            "cell_key": row.cell_key or "",
+            "skill_id": row.skill_id or "",
             "formula": row.formula,
             "input_data": json.loads(row.input_data) if row.input_data else {},
+            "source_refs": json.loads(row.source_refs) if row.source_refs else [],
             "process_text": row.process_text or "",
             "result_value": _decimal_text(row.result_value),
             "operator": row.operator,
@@ -548,6 +581,81 @@ def _calculate_jacket_process_fee(
         subtotal_fee,
         operator,
         "jacket",
+    )
+    return True, ""
+
+
+def _calculate_package_tape_process_fee(
+    db: Session,
+    quotation: QuotationMain,
+    process,
+    operator: str,
+    now: datetime,
+    ctx: CalculationContext | None = None,
+) -> tuple[bool, str]:
+    material_amount_sum = _material_amount_sum(quotation, ctx)
+    if material_amount_sum <= 0:
+        return False, "包带制程计算需要先计算材料金额总和"
+
+    jacket_amount = _jacket_material_amount_sum(quotation, ctx)
+    base_amount = _round4(material_amount_sum - jacket_amount)
+    if base_amount <= 0:
+        return False, "包带制程计算需要材料金额总和扣除外护套材料金额后大于 0"
+
+    startup_loss_wire = Decimal(process.startup_loss_wire or 0)
+    fixed_fee = Decimal(process.fixed_fee or 0)
+    startup_times = Decimal(quotation.order_startup_times or 0)
+
+    process_amount = _round4(startup_loss_wire * base_amount)
+    subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
+
+    process.amount = process_amount
+    process.subtotal_fee = subtotal_fee
+    process.updater = operator
+    process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "package_tape")
+
+    input_data = {
+        "process_fee_id": process.id,
+        "process_fee_name": process.process_name,
+        "material_amount_sum": str(material_amount_sum),
+        "jacket_material_amount": str(jacket_amount),
+        "package_tape_base_amount": str(base_amount),
+        "startup_loss_wire": str(startup_loss_wire),
+        "fixed_fee": str(fixed_fee),
+        "startup_times": str(startup_times),
+        "startup_times_source": "quotation_main.order_startup_times",
+    }
+    process_text = (
+        f"匹配包带制程费用行：{process.process_name or ''}\n"
+        f"参与材料金额 = 材料金额总和 {material_amount_sum} - 外护套材料金额 {jacket_amount} = {base_amount}\n"
+        f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {base_amount} = {process_amount}\n"
+        f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_amount",
+        "包带金额 = 开机损耗废线 × (材料金额总和 - 外护套材料金额)",
+        input_data,
+        process_text,
+        process_amount,
+        operator,
+        "package_tape",
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_subtotal_fee",
+        "包带费用成本小计 = 固定费用 + 金额 × 订单开机次数",
+        input_data,
+        process_text,
+        subtotal_fee,
+        operator,
+        "package_tape",
     )
     return True, ""
 
@@ -918,6 +1026,11 @@ def _is_jacket_process(process) -> bool:
     return "外被" in name or "护套" in name or "外护" in name
 
 
+def _is_package_tape_process(process) -> bool:
+    name = str(process.process_name or "")
+    return "包带" in name
+
+
 def _is_rewind_process(process) -> bool:
     name = str(process.process_name or "")
     return "倒线" in name
@@ -963,6 +1076,16 @@ def _material_amount_sum(quotation: QuotationMain, ctx: CalculationContext | Non
         for item in quotation.materials
         if not item.deleted
         and (ctx is None or item.id in ctx.calculated_material_ids)
+    ))
+
+
+def _jacket_material_amount_sum(quotation: QuotationMain, ctx: CalculationContext | None = None) -> Decimal:
+    return _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in quotation.materials
+        if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
+        and _is_jacket_row(item)
     ))
 
 

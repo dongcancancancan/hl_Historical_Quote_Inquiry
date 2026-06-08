@@ -1,5 +1,6 @@
 import html
 import json
+from types import SimpleNamespace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -418,16 +419,22 @@ def _parse_update_value(raw_value, field_type: str):
     return number
 
 
-def render_quotation_preview(quotation: QuotationMain, instance: QuotationBpmInstance | None = None) -> str:
+def render_quotation_preview(
+    quotation: QuotationMain,
+    instance: QuotationBpmInstance | None = None,
+    apply_unit_price_override_values: bool = True,
+) -> str:
     """Render a cost-analysis worksheet from structured database fields only."""
-    from app.database import SessionLocal
+    unit_price_overrides = {}
+    if apply_unit_price_override_values:
+        from app.database import SessionLocal
 
-    db = SessionLocal()
-    try:
-        unit_price_overrides = load_unit_price_overrides(db, quotation.id)
-    finally:
-        db.close()
-    apply_unit_price_overrides(quotation, unit_price_overrides)
+        db = SessionLocal()
+        try:
+            unit_price_overrides = load_unit_price_overrides(db, quotation.id)
+        finally:
+            db.close()
+        apply_unit_price_overrides(quotation, unit_price_overrides)
     apply_quotation_summaries(quotation)
     materials = sorted(
         (item for item in quotation.materials if not item.deleted),
@@ -612,6 +619,27 @@ def render_quotation_preview(quotation: QuotationMain, instance: QuotationBpmIns
         ]
     )
     return _wrap_preview_html(quotation.quotation_code or "", table_html)
+
+
+def render_quote_snapshot_preview(snapshot_data: dict) -> str:
+    main = snapshot_data.get("main") or {}
+    materials = [
+        SimpleNamespace(**{**item, "deleted": False})
+        for item in (snapshot_data.get("materials") or [])
+    ]
+    processes = [
+        SimpleNamespace(**{**item, "deleted": False})
+        for item in (snapshot_data.get("processes") or [])
+    ]
+    quotation = SimpleNamespace(
+        **main,
+        materials=materials,
+        processes=processes,
+        deleted=False,
+        updater="",
+        update_time=None,
+    )
+    return render_quotation_preview(quotation, None, apply_unit_price_override_values=False)
 
 
 def _row(*cells: str) -> str:

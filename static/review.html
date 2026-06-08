@@ -91,15 +91,15 @@
                     </label>
                     <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveCalcParams()">保存参数</button>
                     <button class="border px-3 py-1 text-xs text-red-600 hover:bg-red-50" onclick="clearUnitPrices()">清空单价</button>
-                    <button class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">一键计算最终售价</button>
+                    <button data-calc-action="true" class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">一键计算最终售价</button>
                     <button id="diagnosisActionBtn" class="border px-3 py-1 text-xs text-purple-700 hover:bg-purple-50" onclick="showCalculationDiagnosis()">智能诊断</button>
-                    <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showPriceSummaryTraces()">查看售价过程</button>
+                    <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showAllTraces()">查看计算过程</button>
                     <details class="text-xs text-gray-600">
                         <summary class="cursor-pointer border px-3 py-1 hover:bg-white">高级计算</summary>
                         <div class="mt-2 flex flex-wrap gap-2 border bg-white p-2">
-                            <button class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体/编织</button>
+                            <button data-calc-action="true" class="border bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700" onclick="calculateConductor()">计算导体/编织</button>
                             <button class="border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50" onclick="showConductorTraces()">查看导体/编织过程</button>
-                            <button class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料/外购</button>
+                            <button data-calc-action="true" class="border bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700" onclick="calculateGlue()">计算胶料/外购</button>
                             <button class="border px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-50" onclick="showGlueTraces()">查看胶料/外购过程</button>
                             <button class="border px-3 py-1 text-xs text-purple-700 hover:bg-purple-50" onclick="showCalculationSkills()">查看计算 Skill</button>
                         </div>
@@ -163,6 +163,7 @@
         let calcParamDirty = false;
         let calcParamAutoSaveTimer = null;
         let calcParamSavingPromise = null;
+        let calculationInFlight = false;
 
         function logout() {
             sessionStorage.clear();
@@ -246,6 +247,28 @@
                 info: 'text-xs text-gray-500',
             };
             element.className = colors[tone] || 'text-xs text-gray-400';
+        }
+
+        function beginCalculation(message) {
+            if (calculationInFlight) {
+                setCalcParamStatus('已有计算正在执行，请稍等...', 'warn');
+                return false;
+            }
+            calculationInFlight = true;
+            document.querySelectorAll('[data-calc-action]').forEach(button => {
+                button.disabled = true;
+                button.classList.add('opacity-50', 'cursor-not-allowed');
+            });
+            if (message) setCalcParamStatus(message, 'info');
+            return true;
+        }
+
+        function endCalculation() {
+            calculationInFlight = false;
+            document.querySelectorAll('[data-calc-action]').forEach(button => {
+                button.disabled = false;
+                button.classList.remove('opacity-50', 'cursor-not-allowed');
+            });
         }
 
         function setCalcInputState(id, invalid) {
@@ -556,23 +579,27 @@
             if (!selectedCode) return;
             if (!(await ensureCalcParamsReady())) return;
             if (!confirm('确认根据铜价和铜加工费重新计算导体/编织单价、材料金额和制程费用吗？')) return;
-            setCalcParamStatus('导体/编织计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/conductor?' + selectedQueryParams(), {
-                method: 'POST',
-                headers: { 'Authorization': 'Bearer ' + token },
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                const detail = data.detail || '未知错误';
-                if (isLocalCalculationIssue(detail)) {
-                    renderLocalCalculationIssue(detail, '导体/编织计算失败');
-                    return;
+            if (!beginCalculation('导体/编织计算中...')) return;
+            try {
+                const res = await fetch('/api/v1/etl/quotation/calculate/conductor?' + selectedQueryParams(), {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    const detail = data.detail || '未知错误';
+                    if (isLocalCalculationIssue(detail)) {
+                        renderLocalCalculationIssue(detail, '导体/编织计算失败');
+                        return;
+                    }
+                    setCalcParamStatus('', 'info');
+                    return alert('导体/编织计算失败：' + detail);
                 }
-                setCalcParamStatus('', 'info');
-                return alert('导体/编织计算失败：' + detail);
+                setCalcParamStatus('已计算材料 ' + data.calculated + ' 行，制程费用 ' + (data.process_calculated || 0) + ' 行', 'ok');
+                await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
+            } finally {
+                endCalculation();
             }
-            setCalcParamStatus('已计算材料 ' + data.calculated + ' 行，制程费用 ' + (data.process_calculated || 0) + ' 行', 'ok');
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
         }
 
         async function showConductorTraces() {
@@ -597,18 +624,22 @@
         async function calculateGlue() {
             if (!selectedCode) return;
             if (!confirm('确认重新计算 C 开头胶料、外购物料的单价、材料金额，以及绝缘/外被/倒线/集合制程费用吗？')) return;
-            setCalcParamStatus('胶料/外购计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/glue?' + selectedQueryParams(), {
-                method: 'POST',
-                headers: { 'Authorization': 'Bearer ' + token },
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                setCalcParamStatus('', 'info');
-                return alert('胶料/外购计算失败：' + (data.detail || '未知错误'));
+            if (!beginCalculation('胶料/外购计算中...')) return;
+            try {
+                const res = await fetch('/api/v1/etl/quotation/calculate/glue?' + selectedQueryParams(), {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    setCalcParamStatus('', 'info');
+                    return alert('胶料/外购计算失败：' + (data.detail || '未知错误'));
+                }
+                setCalcParamStatus('已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，色母 ' + (data.color_masterbatch_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行，包带制程 ' + (data.package_tape_process_calculated || 0) + ' 行，倒线制程 ' + (data.rewind_process_calculated || 0) + ' 行，集合制程 ' + (data.collection_process_calculated || 0) + ' 行', 'ok');
+                await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
+            } finally {
+                endCalculation();
             }
-            setCalcParamStatus('已计算胶料 ' + (data.c_calculated || 0) + ' 行，外购 ' + (data.external_calculated || 0) + ' 行，色母 ' + (data.color_masterbatch_calculated || 0) + ' 行，绝缘制程 ' + (data.insulation_process_calculated || 0) + ' 行，外被制程 ' + (data.jacket_process_calculated || 0) + ' 行，倒线制程 ' + (data.rewind_process_calculated || 0) + ' 行，集合制程 ' + (data.collection_process_calculated || 0) + ' 行', 'ok');
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
         }
 
         async function showGlueTraces() {
@@ -634,26 +665,30 @@
             if (!selectedCode) return;
             if (!(await ensureCalcParamsReady())) return;
             if (!confirm('确认按当前全部逻辑一键计算最终售价吗？系统会依次计算导体/编织、胶料/外购、制程费用和最终售价。')) return;
-            setCalcParamStatus('最终售价计算中...', 'info');
-            const res = await fetch('/api/v1/etl/quotation/calculate/full-price?' + selectedQueryParams(), {
-                method: 'POST',
-                headers: { 'Authorization': 'Bearer ' + token },
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                lastCalculationError = data.detail || '未知错误';
-                if (isLocalCalculationIssue(lastCalculationError)) {
-                    renderLocalCalculationIssue(lastCalculationError, '一键计算失败');
+            if (!beginCalculation('最终售价计算中...')) return;
+            try {
+                const res = await fetch('/api/v1/etl/quotation/calculate/full-price?' + selectedQueryParams(), {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    lastCalculationError = data.detail || '未知错误';
+                    if (isLocalCalculationIssue(lastCalculationError)) {
+                        renderLocalCalculationIssue(lastCalculationError, '一键计算失败');
+                        return;
+                    }
+                    setCalcParamStatus('', 'info');
+                    await showCalculationDiagnosis(lastCalculationError);
                     return;
                 }
-                setCalcParamStatus('', 'info');
-                await showCalculationDiagnosis(lastCalculationError);
-                return;
+                lastCalculationError = '';
+                const statusText = buildFullPriceStatus(data);
+                await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
+                setCalcParamStatus(statusText, 'ok');
+            } finally {
+                endCalculation();
             }
-            lastCalculationError = '';
-            const statusText = buildFullPriceStatus(data);
-            await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
-            setCalcParamStatus(statusText, 'ok');
         }
 
         function buildFullPriceStatus(data) {
@@ -665,26 +700,46 @@
                 ' 行，外购 ' + (glue.external_calculated || 0) +
                 ' 行，色母 ' + (glue.color_masterbatch_calculated || 0) +
                 ' 行，手填兜底 ' + (glue.manual_material_calculated || 0) +
+                ' 行，包带制程 ' + (glue.package_tape_process_calculated || 0) +
                 ' 行，最终售价 ' + (price.final_selling_price || '-');
         }
 
-        async function showPriceSummaryTraces() {
+        async function showAllTraces() {
             if (!selectedCode) return;
-            const res = await fetch('/api/v1/etl/quotation/calculate/price-summary/traces?' + selectedQueryParams(), {
-                headers: { 'Authorization': 'Bearer ' + token },
-            });
-            const data = await res.json();
-            if (!res.ok) return alert('售价计算过程加载失败：' + (data.detail || '未知错误'));
-            const rows = data.items || [];
-            document.getElementById('traceModalTitle').textContent = '售价计算过程';
-            document.getElementById('traceRows').innerHTML = rows.length ? rows.map(item =>
-                '<div class="border p-3">' +
-                '<div class="mb-1 font-semibold">' + escapeHtml(item.field_name) + ' = ' + escapeHtml(item.result_value) + '</div>' +
-                '<div class="mb-1 text-gray-600">' + escapeHtml(item.formula) + '</div>' +
-                '<pre class="whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text) + '</pre>' +
-                '</div>'
-            ).join('') : '<div class="py-6 text-center text-gray-400">暂无售价计算过程</div>';
+            const urls = [
+                ['/api/v1/etl/quotation/calculate/conductor/traces?', '导体/编织'],
+                ['/api/v1/etl/quotation/calculate/glue/traces?', '胶料/外购及制程'],
+                ['/api/v1/etl/quotation/calculate/price-summary/traces?', '售价汇总'],
+            ];
+            document.getElementById('traceModalTitle').textContent = '计算过程';
+            document.getElementById('traceRows').innerHTML = '<div class="py-8 text-center text-gray-400">正在加载计算过程...</div>';
             document.getElementById('traceModal').classList.replace('hidden', 'flex');
+            try {
+                const groups = [];
+                for (const pair of urls) {
+                    const res = await fetch(pair[0] + selectedQueryParams(), {
+                        headers: { 'Authorization': 'Bearer ' + token },
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || '计算过程加载失败');
+                    groups.push({ title: pair[1], rows: data.items || [] });
+                }
+                const html = groups.map(group =>
+                    '<div class="border p-3">' +
+                    '<div class="mb-2 font-semibold text-gray-700">' + escapeHtml(group.title) + '</div>' +
+                    (group.rows.length ? group.rows.map(item =>
+                        '<div class="mb-3 border-l-2 border-orange-200 pl-3">' +
+                        '<div class="font-semibold text-orange-700">' + escapeHtml(item.display_label || item.field_name) + ' = ' + escapeHtml(item.result_value || '') + '</div>' +
+                        '<div class="mt-1 text-gray-600">' + escapeHtml(item.formula || '') + '</div>' +
+                        '<pre class="mt-1 whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text || '') + '</pre>' +
+                        '</div>'
+                    ).join('') : '<div class="py-3 text-gray-400">暂无记录</div>') +
+                    '</div>'
+                ).join('');
+                document.getElementById('traceRows').innerHTML = html || '<div class="py-8 text-center text-gray-400">暂无计算过程</div>';
+            } catch (err) {
+                document.getElementById('traceRows').innerHTML = '<div class="border border-red-200 bg-red-50 p-3 text-red-600">加载失败：' + escapeHtml(err.message) + '</div>';
+            }
         }
 
         async function showCalculationDiagnosis(errorMessage) {

@@ -38,13 +38,29 @@
                     <h2 id="sheetTitle" class="text-sm font-semibold">选择已报价记录查看</h2>
                     <p id="sheetStatus" class="text-xs text-gray-400"></p>
                 </div>
-                <button id="exportBtn" class="hidden text-sm text-blue-600 hover:text-blue-800" onclick="exportExcel()">导出 Excel</button>
+                <div class="flex items-center gap-3">
+                    <button id="traceBtn" class="hidden text-sm text-purple-600 hover:text-purple-800" onclick="showAllTraces()">查看计算过程</button>
+                    <button id="exportBtn" class="hidden text-sm text-blue-600 hover:text-blue-800" onclick="exportExcel()">导出 Excel</button>
+                </div>
             </div>
             <div id="emptyState" class="flex flex-1 items-center justify-center text-sm text-gray-400">从左侧选择一条已报价记录</div>
             <div id="sheetLoading" class="hidden flex flex-1 items-center justify-center text-sm text-gray-400">正在加载数据库内容...</div>
             <iframe id="sheetFrame" class="hidden h-full w-full flex-1 border-0 bg-gray-50" title="已报价成本分析表"></iframe>
         </section>
     </main>
+
+    <div id="traceModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-6">
+        <div class="flex max-h-[86vh] w-full max-w-4xl flex-col bg-white shadow-xl">
+            <div class="flex items-center justify-between border-b px-4 py-3">
+                <div>
+                    <h3 class="text-sm font-semibold">计算过程</h3>
+                    <p id="traceSubTitle" class="text-xs text-gray-400"></p>
+                </div>
+                <button class="text-xl text-gray-400 hover:text-gray-700" onclick="closeTraceModal()">×</button>
+            </div>
+            <div id="traceRows" class="flex-1 space-y-3 overflow-y-auto p-4 text-xs"></div>
+        </div>
+    </div>
 
     <script>
         const token = sessionStorage.getItem('token');
@@ -131,6 +147,7 @@
             document.getElementById('sheetTitle').textContent = selectedCode;
             document.getElementById('sheetStatus').textContent = '已报价 · 只读';
             document.getElementById('exportBtn').classList.remove('hidden');
+            document.getElementById('traceBtn').classList.remove('hidden');
             try {
                 const res = await fetch('/api/v1/etl/quotation/preview?' + selectedQueryParams(), {
                     headers: { 'Authorization': 'Bearer ' + token }
@@ -162,6 +179,48 @@
             link.download = selectedCode + '.xlsx';
             link.click();
             URL.revokeObjectURL(url);
+        }
+
+        async function showAllTraces() {
+            if (!selectedCode) return;
+            const urls = [
+                ['/api/v1/etl/quotation/calculate/conductor/traces?', '导体/编织'],
+                ['/api/v1/etl/quotation/calculate/glue/traces?', '胶料/外购及制程'],
+                ['/api/v1/etl/quotation/calculate/price-summary/traces?', '售价汇总'],
+            ];
+            document.getElementById('traceSubTitle').textContent = selectedCode;
+            document.getElementById('traceRows').innerHTML = '<div class="py-8 text-center text-gray-400">正在加载计算过程...</div>';
+            document.getElementById('traceModal').classList.replace('hidden', 'flex');
+            try {
+                const groups = [];
+                for (const pair of urls) {
+                    const res = await fetch(pair[0] + selectedQueryParams(), {
+                        headers: { 'Authorization': 'Bearer ' + token }
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || '计算过程加载失败');
+                    groups.push({ title: pair[1], rows: data.items || [] });
+                }
+                const html = groups.map(group =>
+                    '<div class="border p-3">' +
+                    '<div class="mb-2 font-semibold text-gray-700">' + escapeHtml(group.title) + '</div>' +
+                    (group.rows.length ? group.rows.map(item =>
+                        '<div class="mb-3 border-l-2 border-purple-200 pl-3">' +
+                        '<div class="font-semibold text-purple-700">' + escapeHtml(item.display_label || item.field_name) + ' = ' + escapeHtml(item.result_value || '') + '</div>' +
+                        '<div class="mt-1 text-gray-600">' + escapeHtml(item.formula || '') + '</div>' +
+                        '<pre class="mt-1 whitespace-pre-wrap text-gray-700">' + escapeHtml(item.process_text || '') + '</pre>' +
+                        '</div>'
+                    ).join('') : '<div class="py-3 text-gray-400">暂无记录</div>') +
+                    '</div>'
+                ).join('');
+                document.getElementById('traceRows').innerHTML = html || '<div class="py-8 text-center text-gray-400">暂无计算过程</div>';
+            } catch (err) {
+                document.getElementById('traceRows').innerHTML = '<div class="border border-red-200 bg-red-50 p-3 text-red-600">加载失败：' + escapeHtml(err.message) + '</div>';
+            }
+        }
+
+        function closeTraceModal() {
+            document.getElementById('traceModal').classList.replace('flex', 'hidden');
         }
 
         loadHistory().catch(err => alert('加载失败：' + err.message));

@@ -1,4 +1,5 @@
 from io import BytesIO
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -203,6 +204,27 @@ def render_quotation_excel(quotation: QuotationMain) -> BytesIO:
     workbook.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def render_quote_snapshot_excel(snapshot_data: dict) -> BytesIO:
+    main = snapshot_data.get("main") or {}
+    materials = [
+        SimpleNamespace(**{**item, "deleted": False})
+        for item in (snapshot_data.get("materials") or [])
+    ]
+    processes = [
+        SimpleNamespace(**{**item, "deleted": False})
+        for item in (snapshot_data.get("processes") or [])
+    ]
+    quotation = SimpleNamespace(
+        **main,
+        materials=materials,
+        processes=processes,
+        deleted=False,
+        updater="",
+        update_time=None,
+    )
+    return render_quotation_excel(quotation)
 
 
 def _write(

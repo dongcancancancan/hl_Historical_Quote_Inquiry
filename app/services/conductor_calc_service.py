@@ -54,6 +54,7 @@ def calculate_conductor_materials(
     db.query(QuotationCalculationTrace).filter(
         QuotationCalculationTrace.quotation_main_id == quotation.id,
         QuotationCalculationTrace.calc_type == "conductor",
+        QuotationCalculationTrace.run_id.is_(None),
     ).delete(synchronize_session=False)
 
     for item in conductor_rows:
@@ -230,24 +231,36 @@ def calculate_conductor_materials(
     return {"calculated": calculated, "process_calculated": process_calculated, "skipped": skipped}
 
 
-def list_conductor_traces(db: Session, quotation: QuotationMain) -> list[dict]:
-    rows = (
-        db.query(QuotationCalculationTrace)
-        .filter(
-            QuotationCalculationTrace.quotation_main_id == quotation.id,
-            QuotationCalculationTrace.calc_type == "conductor",
-        )
-        .order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc())
-        .limit(200)
-        .all()
+def list_conductor_traces(
+    db: Session,
+    quotation: QuotationMain,
+    bpm_instance_id: int | None = None,
+    run_id: int | None = None,
+) -> list[dict]:
+    query = db.query(QuotationCalculationTrace).filter(
+        QuotationCalculationTrace.quotation_main_id == quotation.id,
+        QuotationCalculationTrace.calc_type == "conductor",
     )
+    if run_id:
+        query = query.filter(QuotationCalculationTrace.run_id == run_id)
+    elif bpm_instance_id:
+        query = query.filter(QuotationCalculationTrace.bpm_instance_id == bpm_instance_id)
+    rows = query.order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc()).limit(200).all()
     return [
         {
             "id": row.id,
+            "run_id": row.run_id,
+            "bpm_instance_id": row.bpm_instance_id,
             "material_id": row.material_id,
+            "entity_type": row.entity_type or "",
+            "entity_id": row.entity_id,
             "field_name": row.field_name,
+            "display_label": row.display_label or "",
+            "cell_key": row.cell_key or "",
+            "skill_id": row.skill_id or "",
             "formula": row.formula,
             "input_data": json.loads(row.input_data) if row.input_data else {},
+            "source_refs": json.loads(row.source_refs) if row.source_refs else [],
             "process_text": row.process_text or "",
             "result_value": _decimal_text(row.result_value),
             "operator": row.operator,

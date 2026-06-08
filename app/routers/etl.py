@@ -17,6 +17,7 @@ from app.services.excel_preview_service import (
     clear_material_unit_prices,
     get_review_history,
     get_review_status,
+    render_quote_snapshot_preview,
     render_quotation_preview,
     set_review_status,
     update_quotation_fields,
@@ -35,7 +36,9 @@ from app.services.price_summary_calc_service import calculate_price_summary, lis
 from app.services.full_price_calc_service import calculate_full_price
 from app.services.calculation_skill_engine import list_calculation_skills
 from app.services.calculation_diagnosis_service import diagnose_calculation
-from app.services.excel_service import render_quotation_excel
+from app.services.excel_service import render_quote_snapshot_excel, render_quotation_excel
+from app.services.calculation_run_service import latest_successful_run, record_successful_calculation_run
+from app.services.quote_snapshot_service import create_quote_snapshot, get_active_snapshot, snapshot_dict
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -125,6 +128,21 @@ def _prepare_instance_calculation(quotation: QuotationMain, instance: QuotationB
 def _restore_instance_calculation(quotation: QuotationMain, instance: QuotationBpmInstance | None, old_tags: str | None) -> None:
     if instance:
         quotation.extracted_tags = old_tags
+
+
+def _selected_trace_run_id(
+    db: Session,
+    quotation: QuotationMain,
+    instance: QuotationBpmInstance | None,
+    calc_type: str,
+    run_id: int | None,
+) -> int | None:
+    if run_id:
+        return run_id
+    run = latest_successful_run(db, quotation, instance, calc_type)
+    if not run and instance:
+        run = latest_successful_run(db, quotation, None, calc_type)
+    return run.id if run else None
 
 
 @router.post("/upload_excel")
@@ -298,6 +316,9 @@ def preview_quotation(
     """按成本分析号查询数据库并返回成本分析表网页预览。"""
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     try:
+        snapshot = get_active_snapshot(db, instance) if instance and instance.review_status == "quoted" else None
+        if snapshot:
+            return HTMLResponse(render_quote_snapshot_preview(snapshot_dict(snapshot)))
         return HTMLResponse(render_quotation_preview(quotation, instance))
     except Exception as exc:
         logger.exception("Excel preview failed for %s", code)
@@ -372,8 +393,9 @@ def save_batch_calc_params(
                 sync_instance_calc_params_to_engine(db, quotation, instance, user.display_name)
                 old_tags = _prepare_instance_calculation(quotation, instance)
                 calculate_conductor_materials(db, quotation, user.display_name)
-                calculate_price_summary(db, quotation, user.display_name)
+                price_result = calculate_price_summary(db, quotation, user.display_name)
                 _restore_instance_calculation(quotation, instance, old_tags)
+                record_successful_calculation_run(db, quotation, instance, "full_price", user.display_name, price_result)
                 snapshot_instance_from_quotation(instance, quotation, user.display_name)
                 db.commit()
                 calculated += 1
@@ -453,8 +475,10 @@ def calculate_quotation_conductor(
         old_tags = _prepare_instance_calculation(quotation, instance)
         result = calculate_conductor_materials(db, quotation, user.display_name)
         _restore_instance_calculation(quotation, instance, old_tags)
+        run = record_successful_calculation_run(db, quotation, instance, "conductor", user.display_name, result)
         snapshot_instance_from_quotation(instance, quotation, user.display_name)
         db.commit()
+        result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
         db.rollback()
@@ -465,13 +489,15 @@ def calculate_quotation_conductor(
 def get_quotation_conductor_traces(
     code: str = "",
     instance_id: int | None = None,
+    run_id: int | None = None,
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看导体计算过程")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
-    return {"items": list_conductor_traces(db, quotation)}
+    selected_run_id = _selected_trace_run_id(db, quotation, instance, "conductor", run_id)
+    return {"items": list_conductor_traces(db, quotation, instance.id if instance else None, selected_run_id)}
 
 
 @router.post("/quotation/calculate/glue")
@@ -489,8 +515,10 @@ def calculate_quotation_glue(
         old_tags = _prepare_instance_calculation(quotation, instance)
         result = calculate_glue_materials(db, quotation, user.display_name)
         _restore_instance_calculation(quotation, instance, old_tags)
+        run = record_successful_calculation_run(db, quotation, instance, "glue", user.display_name, result)
         snapshot_instance_from_quotation(instance, quotation, user.display_name)
         db.commit()
+        result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
         db.rollback()
@@ -501,13 +529,15 @@ def calculate_quotation_glue(
 def get_quotation_glue_traces(
     code: str = "",
     instance_id: int | None = None,
+    run_id: int | None = None,
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看胶料计算过程")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
-    return {"items": list_glue_traces(db, quotation)}
+    selected_run_id = _selected_trace_run_id(db, quotation, instance, "glue", run_id)
+    return {"items": list_glue_traces(db, quotation, instance.id if instance else None, selected_run_id)}
 
 
 @router.post("/quotation/calculate/price-summary")
@@ -525,8 +555,10 @@ def calculate_quotation_price_summary(
         old_tags = _prepare_instance_calculation(quotation, instance)
         result = calculate_price_summary(db, quotation, user.display_name)
         _restore_instance_calculation(quotation, instance, old_tags)
+        run = record_successful_calculation_run(db, quotation, instance, "price_summary", user.display_name, result)
         snapshot_instance_from_quotation(instance, quotation, user.display_name)
         db.commit()
+        result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
         db.rollback()
@@ -548,8 +580,10 @@ def calculate_quotation_full_price(
         old_tags = _prepare_instance_calculation(quotation, instance)
         result = calculate_full_price(db, quotation, user.display_name)
         _restore_instance_calculation(quotation, instance, old_tags)
+        run = record_successful_calculation_run(db, quotation, instance, "full_price", user.display_name, result)
         snapshot_instance_from_quotation(instance, quotation, user.display_name)
         db.commit()
+        result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
         db.rollback()
@@ -583,13 +617,15 @@ async def diagnose_quotation_calculation(
 def get_quotation_price_summary_traces(
     code: str = "",
     instance_id: int | None = None,
+    run_id: int | None = None,
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看售价汇总计算过程")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
-    return {"items": list_price_summary_traces(db, quotation)}
+    selected_run_id = _selected_trace_run_id(db, quotation, instance, "price_summary", run_id)
+    return {"items": list_price_summary_traces(db, quotation, instance.id if instance else None, selected_run_id)}
 
 
 @router.patch("/quotation")
@@ -656,11 +692,20 @@ def update_review_status(
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     try:
         status = set_review_status(db, quotation, req.status, user.display_name, instance)
+        snapshot_id = None
+        calculation_run_id = None
+        if status == "quoted" and instance:
+            snapshot = create_quote_snapshot(db, quotation, instance, user.display_name)
+            db.commit()
+            snapshot_id = snapshot.id
+            calculation_run_id = snapshot.calculation_run_id
         return {
             "ok": True,
             "quotation_code": quotation.quotation_code,
             "instance_id": instance.id if instance else None,
             "review_status": status,
+            "snapshot_id": snapshot_id,
+            "calculation_run_id": calculation_run_id,
         }
     except ValueError as exc:
         db.rollback()
@@ -677,7 +722,11 @@ def export_quotation(
     """按成本分析号从数据库生成并下载 Excel。"""
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     try:
-        buffer = render_quotation_excel(quotation)
+        snapshot = get_active_snapshot(db, instance) if instance and instance.review_status == "quoted" else None
+        if snapshot:
+            buffer = render_quote_snapshot_excel(snapshot_dict(snapshot))
+        else:
+            buffer = render_quotation_excel(quotation)
         encoded_filename = quote(f"{quotation.quotation_code}.xlsx")
         return StreamingResponse(
             buffer,

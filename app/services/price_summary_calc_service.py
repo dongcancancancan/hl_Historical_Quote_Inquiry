@@ -93,6 +93,7 @@ def calculate_price_summary(
     db.query(QuotationCalculationTrace).filter(
         QuotationCalculationTrace.quotation_main_id == quotation.id,
         QuotationCalculationTrace.calc_type == "price_summary",
+        QuotationCalculationTrace.run_id.is_(None),
     ).delete(synchronize_session=False)
 
     input_data = {
@@ -183,23 +184,36 @@ def calculate_price_summary(
     }
 
 
-def list_price_summary_traces(db: Session, quotation: QuotationMain) -> list[dict]:
-    rows = (
-        db.query(QuotationCalculationTrace)
-        .filter(
-            QuotationCalculationTrace.quotation_main_id == quotation.id,
-            QuotationCalculationTrace.calc_type == "price_summary",
-        )
-        .order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc())
-        .limit(100)
-        .all()
+def list_price_summary_traces(
+    db: Session,
+    quotation: QuotationMain,
+    bpm_instance_id: int | None = None,
+    run_id: int | None = None,
+) -> list[dict]:
+    query = db.query(QuotationCalculationTrace).filter(
+        QuotationCalculationTrace.quotation_main_id == quotation.id,
+        QuotationCalculationTrace.calc_type == "price_summary",
     )
+    if run_id:
+        query = query.filter(QuotationCalculationTrace.run_id == run_id)
+    elif bpm_instance_id:
+        query = query.filter(QuotationCalculationTrace.bpm_instance_id == bpm_instance_id)
+    rows = query.order_by(QuotationCalculationTrace.create_time.desc(), QuotationCalculationTrace.id.desc()).limit(100).all()
+    rows = _dedupe_price_summary_rows(rows)
     return [
         {
             "id": row.id,
+            "run_id": row.run_id,
+            "bpm_instance_id": row.bpm_instance_id,
+            "entity_type": row.entity_type or "",
+            "entity_id": row.entity_id,
             "field_name": row.field_name,
+            "display_label": row.display_label or "",
+            "cell_key": row.cell_key or "",
+            "skill_id": row.skill_id or "",
             "formula": row.formula,
             "input_data": json.loads(row.input_data) if row.input_data else {},
+            "source_refs": json.loads(row.source_refs) if row.source_refs else [],
             "process_text": row.process_text or "",
             "result_value": _decimal_text(row.result_value),
             "operator": row.operator,
@@ -207,6 +221,14 @@ def list_price_summary_traces(db: Session, quotation: QuotationMain) -> list[dic
         }
         for row in rows
     ]
+
+
+def _dedupe_price_summary_rows(rows: list[QuotationCalculationTrace]) -> list[QuotationCalculationTrace]:
+    order = ["cost", "profit_selling_price", "non_profit_price", "final_selling_price"]
+    latest_by_field = {}
+    for row in rows:
+        latest_by_field.setdefault(row.field_name, row)
+    return [latest_by_field[field] for field in order if field in latest_by_field]
 
 
 def _validate_current_calculation_context(materials, processes, ctx: CalculationContext):
