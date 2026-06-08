@@ -33,11 +33,18 @@ def list_material_prices(db: Session, keyword: str = ""):
                            id DESC
                    ) AS rn
             FROM dbo.PVC_MaterialPrice
+        ),
+        all_materials AS (
+            SELECT PRD_NO FROM bom_materials
+            UNION
+            SELECT PRD_NO
+            FROM dbo.PVC_MaterialPrice
+            WHERE PRD_NO IS NOT NULL AND LTRIM(RTRIM(PRD_NO)) <> ''
         )
         SELECT
             p.id,
-            b.PRD_NO,
-            COALESCE(NULLIF(p.NAME, ''), b.ZJNAME) AS NAME,
+            a.PRD_NO,
+            COALESCE(NULLIF(p.NAME, ''), b.ZJNAME, a.PRD_NO) AS NAME,
             COALESCE(NULLIF(p.UT, ''), b.BOM_UT) AS UT,
             p.UP,
             p.CREATEDATE,
@@ -45,14 +52,15 @@ def list_material_prices(db: Session, keyword: str = ""):
             p.MODIFYDATE,
             p.REM,
             p.HSYF,
-            b.used_count
-        FROM bom_materials b
-        LEFT JOIN current_prices p ON p.PRD_NO = b.PRD_NO AND p.rn = 1
+            COALESCE(b.used_count, 0) AS used_count
+        FROM all_materials a
+        LEFT JOIN bom_materials b ON b.PRD_NO = a.PRD_NO
+        LEFT JOIN current_prices p ON p.PRD_NO = a.PRD_NO AND p.rn = 1
         WHERE (:keyword = ''
-            OR b.PRD_NO LIKE :like_keyword
+            OR a.PRD_NO LIKE :like_keyword
             OR b.ZJNAME LIKE :like_keyword
             OR p.NAME LIKE :like_keyword)
-        ORDER BY CASE WHEN p.UP IS NULL THEN 0 ELSE 1 END, b.PRD_NO
+        ORDER BY CASE WHEN p.UP IS NULL THEN 0 ELSE 1 END, a.PRD_NO
     """), {"keyword": keyword, "like_keyword": f"%{keyword}%"}).mappings().all()
     return [_serialize_current_material(row) for row in rows]
 

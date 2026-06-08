@@ -219,6 +219,10 @@ def calculate_conductor_materials(
         message = "；".join(item["reason"] for item in skipped) or "没有可计算的导体/编织行"
         raise ValueError(message)
     if skipped:
+        if calculated > 0 or process_calculated > 0:
+            _recalculate_material_summary(quotation, operator, now)
+            _recalculate_process_summary(quotation, operator, now)
+            db.flush()
         message = "；".join(item["reason"] for item in skipped)
         raise ValueError(message)
 

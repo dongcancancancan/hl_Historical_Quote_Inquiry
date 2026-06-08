@@ -167,6 +167,14 @@ def calculate_glue_materials(
         elif error:
             hard_errors.append(error)
 
+    has_partial_result = (
+        calculated > 0
+        or insulation_process_calculated > 0
+        or jacket_process_calculated > 0
+        or package_tape_process_calculated > 0
+        or rewind_process_calculated > 0
+        or collection_process_calculated > 0
+    )
     if (
         calculated == 0
         and insulation_process_calculated == 0
@@ -178,9 +186,17 @@ def calculate_glue_materials(
         message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、包带、倒线或集合制程行"
         raise ValueError(message)
     if hard_errors:
+        if has_partial_result:
+            _recalculate_material_summary(quotation, operator, now)
+            _recalculate_process_summary(quotation, operator, now)
+            db.flush()
         skipped_messages = [item["reason"] for item in skipped]
         raise ValueError("；".join(skipped_messages + hard_errors))
     if skipped:
+        if has_partial_result:
+            _recalculate_material_summary(quotation, operator, now)
+            _recalculate_process_summary(quotation, operator, now)
+            db.flush()
         raise ValueError("；".join(item["reason"] for item in skipped))
 
     _recalculate_material_summary(quotation, operator, now)
@@ -740,7 +756,7 @@ def _calculate_collection_process_fee(
         return False, _missing_collection_amount_message(quotation, "铜绞", _is_core_conductor_row)
     if amounts["core_press_amount"] <= 0:
         return False, _missing_collection_amount_message(quotation, "芯押", _is_insulation_row)
-    if amounts["core_twist_amount"] <= 0:
+    if amounts["has_core_twist"] and amounts["core_twist_amount"] <= 0:
         return False, _missing_collection_amount_message(quotation, "芯绞", _is_core_twist_row)
 
     startup_loss_wire = Decimal(process.startup_loss_wire or 0)
@@ -764,16 +780,23 @@ def _calculate_collection_process_fee(
         "copper_material_amount": str(amounts["copper_amount"]),
         "core_press_material_amount": str(amounts["core_press_amount"]),
         "core_twist_material_amount": str(amounts["core_twist_amount"]),
+        "has_core_twist": amounts["has_core_twist"],
         "collection_material_amount_sum": str(material_amount_sum),
         "startup_loss_wire": str(startup_loss_wire),
         "fixed_fee": str(fixed_fee),
         "startup_times": str(startup_times),
         "startup_times_source": "quotation_main.order_startup_times",
     }
+    material_formula_text = (
+        f"铜绞 {amounts['copper_amount']} + 芯押 {amounts['core_press_amount']}"
+    )
+    formula = "集合金额 = 集合开机损耗废线 × (铜绞材料金额 + 芯押材料金额)"
+    if amounts["has_core_twist"]:
+        material_formula_text += f" + 芯绞 {amounts['core_twist_amount']}"
+        formula = "集合金额 = 集合开机损耗废线 × (铜绞材料金额 + 芯押材料金额 + 芯绞材料金额)"
     process_text = (
         f"匹配集合制程费用行：{process.process_name or ''}\n"
-        f"参与材料金额 = 铜绞 {amounts['copper_amount']} + 芯押 {amounts['core_press_amount']}"
-        f" + 芯绞 {amounts['core_twist_amount']} = {material_amount_sum}\n"
+        f"参与材料金额 = {material_formula_text} = {material_amount_sum}\n"
         f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {material_amount_sum} = {process_amount}\n"
         f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
     )
@@ -782,7 +805,7 @@ def _calculate_collection_process_fee(
         quotation,
         None,
         "process_amount",
-        "集合金额 = 集合开机损耗废线 × (铜绞材料金额 + 芯押材料金额 + 芯绞材料金额)",
+        formula,
         input_data,
         process_text,
         process_amount,
@@ -1092,7 +1115,11 @@ def _jacket_material_amount_sum(quotation: QuotationMain, ctx: CalculationContex
 def _collection_material_amounts(
     quotation: QuotationMain,
     ctx: CalculationContext | None = None,
-) -> dict[str, Decimal]:
+) -> dict[str, Decimal | bool]:
+    core_twist_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_core_twist_row(item)
+    ]
     copper_amount = _round4(sum(
         Decimal(item.material_amount or 0)
         for item in quotation.materials
@@ -1118,6 +1145,7 @@ def _collection_material_amounts(
         "copper_amount": copper_amount,
         "core_press_amount": core_press_amount,
         "core_twist_amount": core_twist_amount,
+        "has_core_twist": bool(core_twist_rows),
         "total": _round4(copper_amount + core_press_amount + core_twist_amount),
     }
 

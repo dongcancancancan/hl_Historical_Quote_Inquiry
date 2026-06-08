@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import logging
+from datetime import datetime
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -64,9 +65,9 @@ class QuotationReviewStatusRequest(BaseModel):
 
 
 class QuotationCalcParamRequest(BaseModel):
-    copper_price: str | None = None
-    copper_rod_process_fee: str = "1055"
-    vat_rate: str = "1.13"
+    copper_price: str | int | float | None = None
+    copper_rod_process_fee: str | int | float = "1055"
+    vat_rate: str | int | float = "1.13"
 
 
 class BatchCalcParamRequest(QuotationCalcParamRequest):
@@ -143,6 +144,27 @@ def _selected_trace_run_id(
     if not run and instance:
         run = latest_successful_run(db, quotation, None, calc_type)
     return run.id if run else None
+
+
+def _clear_full_price_outputs(quotation: QuotationMain, instance: QuotationBpmInstance | None, operator: str) -> None:
+    now = datetime.now()
+    quotation.unit_usage_sum = None
+    quotation.material_amount_sum = None
+    quotation.material_cost = None
+    quotation.total_fee = None
+    quotation.cost = None
+    quotation.profit_selling_price = None
+    quotation.non_profit_price = None
+    quotation.final_selling_price = None
+    quotation.updater = operator
+    quotation.update_time = now
+    if instance:
+        instance.cost = None
+        instance.profit_selling_price = None
+        instance.non_profit_price = None
+        instance.final_selling_price = None
+        instance.updater = operator
+        instance.update_time = now
 
 
 @router.post("/upload_excel")
@@ -392,8 +414,8 @@ def save_batch_calc_params(
             if req.calculate_after_save:
                 sync_instance_calc_params_to_engine(db, quotation, instance, user.display_name)
                 old_tags = _prepare_instance_calculation(quotation, instance)
-                calculate_conductor_materials(db, quotation, user.display_name)
-                price_result = calculate_price_summary(db, quotation, user.display_name)
+                _clear_full_price_outputs(quotation, instance, user.display_name)
+                price_result = calculate_full_price(db, quotation, user.display_name)
                 _restore_instance_calculation(quotation, instance, old_tags)
                 record_successful_calculation_run(db, quotation, instance, "full_price", user.display_name, price_result)
                 snapshot_instance_from_quotation(instance, quotation, user.display_name)
@@ -575,9 +597,11 @@ def calculate_quotation_full_price(
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以执行最终售价计算")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    old_tags = None
     try:
         sync_instance_calc_params_to_engine(db, quotation, instance, user.display_name)
         old_tags = _prepare_instance_calculation(quotation, instance)
+        _clear_full_price_outputs(quotation, instance, user.display_name)
         result = calculate_full_price(db, quotation, user.display_name)
         _restore_instance_calculation(quotation, instance, old_tags)
         run = record_successful_calculation_run(db, quotation, instance, "full_price", user.display_name, result)
@@ -586,7 +610,8 @@ def calculate_quotation_full_price(
         result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
-        db.rollback()
+        _restore_instance_calculation(quotation, instance, old_tags)
+        db.commit()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -664,7 +689,7 @@ def clear_quotation_unit_prices(
     user: UserContext = Depends(get_current_user),
 ):
     if not user.is_reviewer:
-        raise HTTPException(status_code=403, detail="仅审价科账号可以清空单价")
+        raise HTTPException(status_code=403, detail="仅审价科账号可以清空计算结果")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     try:
         result = clear_material_unit_prices(db, quotation, user.display_name, instance)
@@ -674,8 +699,8 @@ def clear_quotation_unit_prices(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
         db.rollback()
-        logger.exception("Clear quotation unit prices failed for %s", code)
-        raise HTTPException(status_code=500, detail="清空单价失败")
+        logger.exception("Clear quotation calculation results failed for %s", code)
+        raise HTTPException(status_code=500, detail="清空计算结果失败")
 
 
 @router.patch("/quotation/review-status")

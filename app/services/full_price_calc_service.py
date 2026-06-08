@@ -8,5 +8,4 @@ def calculate_full_price(db: Session, quotation: QuotationMain, operator: str) -
     try:
         return run_full_price_skills(db, quotation, operator)
     except ValueError as exc:
-        db.rollback()
         raise ValueError(str(exc)) from exc

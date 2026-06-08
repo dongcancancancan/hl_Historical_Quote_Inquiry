@@ -107,7 +107,7 @@
         const displayName = sessionStorage.getItem('displayName') || sessionStorage.getItem('userName') || '';
         const isAdmin = sessionStorage.getItem('isAdmin') === '1';
         if (!token) { window.location.href = '/static/login.html'; }
-        if (sessionStorage.getItem('role') === 'reviewer') { window.location.href = '/static/review.html'; }
+        if (sessionStorage.getItem('role') === 'reviewer') { window.location.href = '/static/review-v2/index.html'; }
 
         // 时间问候语 + 头像
         (function renderGreeting() {

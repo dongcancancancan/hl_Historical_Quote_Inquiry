@@ -14,6 +14,7 @@ from app.models.quotation import (
     QuotationMaterial,
     QuotationProcessFee,
 )
+from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.user import User
 from app.services.quotation_summary_service import apply_quotation_summaries
 from app.services.unit_price_override_service import (
@@ -349,6 +350,7 @@ def clear_material_unit_prices(
 
     now = datetime.now()
     materials = [item for item in quotation.materials if not item.deleted]
+    processes = [item for item in quotation.processes if not item.deleted]
     disabled_overrides = (
         db.query(QuotationFieldOverride)
         .filter(
@@ -367,20 +369,58 @@ def clear_material_unit_prices(
         )
     )
 
-    cleared = 0
+    cleared_materials = 0
     for item in materials:
         if item.unit_price is not None or item.material_amount is not None:
-            cleared += 1
+            cleared_materials += 1
         item.unit_price = None
         item.material_amount = None
         item.updater = updater
         item.update_time = now
 
-    apply_quotation_summaries(quotation, materials, quotation.processes, updater, now)
+    cleared_processes = 0
+    for item in processes:
+        if item.amount is not None or item.subtotal_fee is not None:
+            cleared_processes += 1
+        item.amount = None
+        item.subtotal_fee = None
+        item.updater = updater
+        item.update_time = now
+
+    quotation.unit_usage_sum = None
+    quotation.material_amount_sum = None
+    quotation.material_cost = None
+    quotation.total_fee = None
+    quotation.cost = None
+    quotation.profit_selling_price = None
+    quotation.non_profit_price = None
+    quotation.final_selling_price = None
+    quotation.updater = updater
+    quotation.update_time = now
+
+    if instance:
+        instance.cost = None
+        instance.profit_selling_price = None
+        instance.non_profit_price = None
+        instance.final_selling_price = None
+        instance.updater = updater
+        instance.update_time = now
+
+    cleared_traces = (
+        db.query(QuotationCalculationTrace)
+        .filter(
+            QuotationCalculationTrace.quotation_main_id == quotation.id,
+            QuotationCalculationTrace.run_id.is_(None),
+        )
+        .delete(synchronize_session=False)
+    )
     db.commit()
     return {
         "quotation_code": quotation.quotation_code or "",
-        "cleared": cleared,
+        "cleared": cleared_materials,
+        "cleared_materials": cleared_materials,
+        "cleared_processes": cleared_processes,
+        "cleared_traces": cleared_traces,
         "disabled_overrides": disabled_overrides,
     }
 

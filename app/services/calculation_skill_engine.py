@@ -106,14 +106,20 @@ def list_calculation_skills() -> list[dict]:
 def run_full_price_skills(db: Session, quotation: QuotationMain, operator: str) -> dict:
     ctx = CalculationContext()
     result = {"skills": list_calculation_skills()}
+    failures: list[str] = []
     for skill in sorted(BUILTIN_CALCULATION_SKILLS, key=lambda item: item.order):
         try:
             result[skill.id] = skill.run(db, quotation, operator, ctx)
         except ValueError as exc:
-            db.rollback()
-            raise ValueError(f"{skill.name}失败：{exc}") from exc
+            db.flush()
+            message = f"{skill.name}失败：{exc}"
+            result[skill.id] = {"error": str(exc)}
+            failures.append(message)
+            continue
     result["conductor"] = result.get("conductor_material_and_process")
     result["glue"] = result.get("glue_external_and_process")
     result["price_summary"] = result.get("price_summary")
-    db.commit()
+    db.flush()
+    if failures:
+        raise ValueError("；".join(failures))
     return result

@@ -6,3 +6,5 @@ __pycache__/
 data/
 .vscode/
 .idea/
+node_modules/
+frontend/**/dist/

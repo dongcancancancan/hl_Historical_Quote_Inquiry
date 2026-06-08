@@ -31,12 +31,12 @@
             <p class="text-xs text-gray-400">历史成本分析表审价</p>
         </div>
         <div class="flex items-center gap-3">
-            <a href="/static/copper-fees.html" class="text-sm text-blue-600 hover:text-blue-800">铜加工费</a>
-            <a href="/static/pvc-material-prices.html" class="text-sm text-blue-600 hover:text-blue-800">PVC 材料价格</a>
-            <a href="/static/pvc-boms.html" class="text-sm text-blue-600 hover:text-blue-800">PVC 母料 BOM</a>
-            <a href="/static/review-quoted.html" class="text-sm text-blue-600 hover:text-blue-800">已报价历史</a>
-            <a href="/static/review-batch.html" class="text-sm text-blue-600 hover:text-blue-800">批量操作</a>
-            <a href="/static/copper-scenarios.html" class="text-sm text-blue-600 hover:text-blue-800">铜价区间测算</a>
+            <a href="/static/review-v2/copper-fees.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">铜加工费</a>
+            <a href="/static/review-v2/pvc-material-prices.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">PVC 材料价格</a>
+            <a href="/static/review-v2/pvc-boms.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">PVC 母料 BOM</a>
+            <a href="/static/review-v2/quoted.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">已报价历史</a>
+            <a href="/static/review-v2/batch.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">批量操作</a>
+            <a href="/static/review-v2/copper-scenarios.html" class="text-sm text-blue-600 hover:text-blue-800" onclick="openInternalPage(event, this.href)">铜价区间测算</a>
             <span id="reviewerName" class="text-sm text-gray-600"></span>
             <button class="text-xs text-gray-400 hover:text-red-500" onclick="logout()">退出</button>
         </div>
@@ -90,7 +90,7 @@
                         <input id="calcVatRate" type="number" min="0" step="0.0001" class="mt-1 w-24 border px-2 py-1 text-xs" value="1.13">
                     </label>
                     <button class="border bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700" onclick="saveCalcParams()">保存参数</button>
-                    <button class="border px-3 py-1 text-xs text-red-600 hover:bg-red-50" onclick="clearUnitPrices()">清空单价</button>
+                    <button class="border px-3 py-1 text-xs text-red-600 hover:bg-red-50" onclick="clearUnitPrices()">清空计算结果</button>
                     <button data-calc-action="true" class="border bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-700" onclick="calculatePriceSummary()">一键计算最终售价</button>
                     <button id="diagnosisActionBtn" class="border px-3 py-1 text-xs text-purple-700 hover:bg-purple-50" onclick="showCalculationDiagnosis()">智能诊断</button>
                     <button class="border px-3 py-1 text-xs text-orange-700 hover:bg-orange-50" onclick="showAllTraces()">查看计算过程</button>
@@ -168,6 +168,24 @@
         function logout() {
             sessionStorage.clear();
             window.location.href = '/static/login.html';
+        }
+
+        function openInternalPage(event, url) {
+            if (event) event.preventDefault();
+            const target = window.open('about:blank', '_blank');
+            if (!target) {
+                window.location.href = url;
+                return;
+            }
+            try {
+                ['token', 'tenantId', 'tenantName', 'userName', 'displayName', 'isAdmin', 'role'].forEach(key => {
+                    const value = sessionStorage.getItem(key);
+                    if (value !== null) target.sessionStorage.setItem(key, value);
+                });
+                target.location.href = url;
+            } catch (err) {
+                target.location.href = url;
+            }
         }
 
         function escapeHtml(str) {
@@ -896,9 +914,9 @@
 
         async function clearUnitPrices() {
             if (!selectedCode) return;
-            if (selectedStatus === 'quoted') return alert('已报价的成本分析表只能查看，不能清空单价');
-            if (!confirm('确认清空 ' + selectedCode + ' 的全部材料单价和材料金额吗？清空后可点击一键计算重新检索单价。')) return;
-            setCalcParamStatus('正在清空单价...', 'info');
+            if (selectedStatus === 'quoted') return alert('已报价的成本分析表只能查看，不能清空计算结果');
+            if (!confirm('确认清空 ' + selectedCode + ' 的平台计算结果吗？将清空单价、材料金额、制程金额、费用小计和最终售价等结果，不会清空物料编码、用量、固定费用、订单参数和铜价参数。')) return;
+            setCalcParamStatus('正在清空计算结果...', 'info');
             const res = await fetch('/api/v1/etl/quotation/unit-prices/clear?' + selectedQueryParams(), {
                 method: 'PATCH',
                 headers: { 'Authorization': 'Bearer ' + token },
@@ -906,10 +924,10 @@
             const data = await res.json();
             if (!res.ok) {
                 setCalcParamStatus('', 'info');
-                return alert('清空单价失败：' + (data.detail || '未知错误'));
+                return alert('清空计算结果失败：' + (data.detail || '未知错误'));
             }
             await selectQuotation(encodeURIComponent(selectedCode), selectedStatus, selectedInstanceId);
-            setCalcParamStatus('已清空 ' + (data.cleared || 0) + ' 行单价，可重新一键计算', 'ok');
+            setCalcParamStatus('已清空材料 ' + ((data.cleared_materials ?? data.cleared) || 0) + ' 行、制程 ' + (data.cleared_processes || 0) + ' 行，可重新一键计算', 'ok');
         }
 
         async function markQuoted() {

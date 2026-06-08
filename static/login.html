@@ -29,7 +29,7 @@
 
     <script>
         if (sessionStorage.getItem('token')) {
-            window.location.href = sessionStorage.getItem('role') === 'reviewer' ? '/static/review.html' : '/static/index.html';
+            window.location.href = sessionStorage.getItem('role') === 'reviewer' ? '/static/review-v2/index.html' : '/static/index.html';
         }
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -55,7 +55,7 @@
                 sessionStorage.setItem('displayName', data.display_name || data.username);
                 sessionStorage.setItem('isAdmin', data.is_admin ? '1' : '');
                 sessionStorage.setItem('role', data.role || 'engineering');
-                window.location.href = data.role === 'reviewer' ? '/static/review.html' : '/static/index.html';
+                window.location.href = data.role === 'reviewer' ? '/static/review-v2/index.html' : '/static/index.html';
             } catch (err) {
                 errorDiv.textContent = err.message;
                 errorDiv.classList.remove('hidden');

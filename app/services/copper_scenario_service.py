@@ -48,7 +48,7 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
     if not bpm_no:
         raise ValueError("请填写 BPM 流程号")
 
-    rows = (
+    db_rows = (
         db.query(QuotationMain, QuotationBpmInstance)
         .join(QuotationBpmInstance, QuotationBpmInstance.quotation_main_id == QuotationMain.id)
         .filter(
@@ -59,12 +59,12 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
         .order_by(QuotationMain.quotation_code, QuotationBpmInstance.id)
         .all()
     )
-    if not rows:
+    if not db_rows:
         raise ValueError("未找到该 BPM 流程号下的成本分析表")
 
     bands = build_copper_bands()
-    rows = []
-    for quotation, instance in rows:
+    result_rows = []
+    for quotation, instance in db_rows:
         params = (
             db.query(QuotationCalcParam)
             .filter(QuotationCalcParam.quotation_main_id == quotation.id)
@@ -88,7 +88,7 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
                     "error": str(exc),
                 })
                 errors.append(str(exc))
-        rows.append({
+        result_rows.append({
             "quotation_code": quotation.quotation_code or "",
             "bpm_no": bpm_no,
             "customer_name": quotation.customer_name or "",
@@ -101,8 +101,8 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
     return {
         "bpm_no": bpm_no,
         "bands": bands,
-        "items": rows,
-        "mapped_codes": [quotation.quotation_code for quotation, _instance in rows if quotation.quotation_code],
+        "items": result_rows,
+        "mapped_codes": [quotation.quotation_code for quotation, _instance in db_rows if quotation.quotation_code],
     }
 
 
@@ -199,7 +199,11 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
 
     for process in [row for row in quotation.processes if not row.deleted and _is_collection_process(row)]:
         amounts = _simulated_collection_material_amounts(quotation, material_amounts)
-        if amounts["copper_amount"] <= 0 or amounts["core_press_amount"] <= 0 or amounts["core_twist_amount"] <= 0:
+        if (
+            amounts["copper_amount"] <= 0
+            or amounts["core_press_amount"] <= 0
+            or (amounts["has_core_twist"] and amounts["core_twist_amount"] <= 0)
+        ):
             continue
         process_amount = _round4(_decimal(process.startup_loss_wire) * amounts["total"])
         process_subtotals[process.id] = _round4(
@@ -271,23 +275,27 @@ def _simulated_conductor_material_amount_before(quotation: QuotationMain, insula
     return _round4(sum(material_amounts.get(item.id, _decimal(item.material_amount)) for item in candidates))
 
 
-def _simulated_collection_material_amounts(quotation: QuotationMain, material_amounts: dict[int, Decimal]) -> dict[str, Decimal]:
+def _simulated_collection_material_amounts(quotation: QuotationMain, material_amounts: dict[int, Decimal]) -> dict[str, Decimal | bool]:
     copper_amount = _round4(sum(
         material_amounts.get(item.id, _decimal(item.material_amount))
         for item in quotation.materials
         if not item.deleted and _is_core_conductor_row(item)
     ))
+    core_twist_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_core_twist_row(item)
+    ]
     current_amounts = _collection_material_amounts(quotation)
     core_press_amount = current_amounts["core_press_amount"]
     core_twist_amount = _round4(sum(
         _decimal(item.material_amount)
-        for item in quotation.materials
-        if not item.deleted and _is_core_twist_row(item)
+        for item in core_twist_rows
     ))
     return {
         "copper_amount": copper_amount,
         "core_press_amount": core_press_amount,
         "core_twist_amount": core_twist_amount,
+        "has_core_twist": bool(core_twist_rows),
         "total": _round4(copper_amount + core_press_amount + core_twist_amount),
     }
 
