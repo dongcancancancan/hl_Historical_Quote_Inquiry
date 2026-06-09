@@ -184,6 +184,14 @@ export interface CalcParams {
   copper_price: string | number | null;
   copper_rod_process_fee: string | number | null;
   vat_rate: string | number | null;
+  transport_fee?: string | number | null;
+  other_fee?: string | number | null;
+  net_profit_rate?: string | number | null;
+  customs_fee?: string | number | null;
+  order_meterage?: string | number | null;
+  operating_expense_rate?: string | number | null;
+  monthly_interest?: string | number | null;
+  corporate_tax_rate?: string | number | null;
   update_time?: string;
 }
 

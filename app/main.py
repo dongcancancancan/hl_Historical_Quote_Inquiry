@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from app.routers import etl_router, auth_router, copper_fees_router, pvc_material_prices_router, pvc_boms_router
 from app.core.config import settings
+from app.services.schema_ensure_service import ensure_runtime_schema
 
 # 配置日志：INFO 级别以上输出到终端
 logging.basicConfig(
@@ -27,6 +28,21 @@ app.include_router(pvc_boms_router, prefix="/api/v1/pvc-boms", tags=["PVC 母料
 
 # 挂载前端静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.middleware("http")
+async def no_cache_review_v2_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/review-v2/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
+@app.on_event("startup")
+def startup_schema_ensure():
+    ensure_runtime_schema()
 
 
 @app.get("/")

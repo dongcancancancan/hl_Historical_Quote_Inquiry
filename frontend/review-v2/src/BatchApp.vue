@@ -2,8 +2,8 @@
   <div class="review-shell">
     <header class="topbar">
       <div>
-        <h1>审价科批量操作</h1>
-        <p>按 BPM 流程号批量设置铜价、计算和删除 · Vue 3</p>
+        <h1>批量审价参数</h1>
+        <p>按 BPM 流程号统一维护审价参数 · Vue 3</p>
       </div>
       <nav>
         <a href="/static/review-v2/index.html" @click.prevent="openInternalPage('/static/review-v2/index.html')">返回工作台</a>
@@ -14,100 +14,144 @@
       </nav>
     </header>
 
-    <main class="batch-page">
-      <section class="batch-query">
-        <el-form class="batch-query-form" inline @submit.prevent>
-          <el-form-item label="BPM流程号">
-            <el-input
-              v-model.trim="bpmNo"
-              class="batch-bpm-input"
-              placeholder="EG-B015-26050127"
-              clearable
-              @keyup.enter="loadQuotations"
-              @blur="bpmNo = bpmNo.toUpperCase()"
-            />
-          </el-form-item>
-          <el-button type="primary" :loading="loading" @click="loadQuotations">查询</el-button>
-          <span class="batch-status">{{ statusText }}</span>
-        </el-form>
+    <main class="batch-workspace">
+      <aside class="batch-side">
+        <section class="batch-query-card">
+          <h2>BPM流程号</h2>
+          <el-input
+            v-model.trim="bpmNo"
+            class="batch-bpm-input"
+            placeholder="EG-B015-26050127"
+            clearable
+            @keyup.enter="loadQuotations"
+            @blur="bpmNo = bpmNo.toUpperCase()"
+          />
+          <el-button class="wide" type="primary" :loading="loading" @click="loadQuotations">查询</el-button>
+          <p>{{ statusText || "输入流程号后加载该流程下全部成本分析表" }}</p>
+        </section>
+
+        <section class="batch-selection-card">
+          <div class="batch-selection-count">
+            <strong>{{ selectedRows.length }}</strong>
+            <span>/ {{ selectableRows.length }} 已选择</span>
+          </div>
+          <el-button class="wide" size="small" plain :disabled="!selectableRows.length" @click="selectAllPending">全选待报价</el-button>
+          <el-button class="wide no-margin" size="small" plain :disabled="!selectedRows.length" @click="clearSelection">清空选择</el-button>
+          <p>已报价记录只读展示，不能勾选。参数按 BPM 实例保存，不影响其它 BPM 流程复用的同一成本分析表。</p>
+        </section>
+      </aside>
+
+      <section class="batch-table-panel">
+        <div class="batch-panel-head">
+          <div>
+            <strong>成本分析表</strong>
+            <span>查询后默认全选待报价记录</span>
+          </div>
+          <el-tag size="small" effect="plain">{{ items.length }} 条</el-tag>
+        </div>
+        <el-table
+          ref="tableRef"
+          v-loading="loading"
+          class="batch-table"
+          :data="items"
+          row-key="instance_id"
+          height="calc(100vh - 154px)"
+          border
+          @selection-change="selectedRows = $event"
+        >
+          <el-table-column type="selection" width="48" :selectable="isSelectable" />
+          <el-table-column label="成本分析号" min-width="215">
+            <template #default="{ row }">
+              <span class="mono strong">{{ row.quotation_code }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="105">
+            <template #default="{ row }">
+              <el-tag v-if="row.review_status === 'quoted'" size="small" type="success" effect="plain">已报价</el-tag>
+              <el-tag v-else-if="rowStatus(row)" size="small" :type="rowStatus(row)?.type" effect="plain">
+                {{ rowStatus(row)?.text }}
+              </el-tag>
+              <el-tag v-else size="small" type="warning" effect="plain">待报价</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="BPM" min-width="170">
+            <template #default="{ row }">
+              <span class="mono link-text">{{ row.bpm_no || "-" }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="报价日期" width="115" prop="quote_date" />
+          <el-table-column label="上传人" width="110" prop="upload_user" />
+          <el-table-column label="上传时间" width="165">
+            <template #default="{ row }">{{ formatTime(row.create_time) }}</template>
+          </el-table-column>
+          <el-table-column label="品名规格" min-width="260" prop="product_spec" show-overflow-tooltip />
+        </el-table>
       </section>
 
-      <section class="batch-layout">
-        <div class="batch-table-panel">
-          <div class="batch-panel-head">
-            <div>
-              <strong>成本分析表</strong>
-              <span>已选择 {{ selectedRows.length }} 条待报价记录</span>
-            </div>
-            <el-button size="small" text type="primary" :disabled="!items.length" @click="selectAllPending">选择全部待报价</el-button>
-          </div>
-          <el-table
-            ref="tableRef"
-            v-loading="loading"
-            class="batch-table"
-            :data="items"
-            row-key="instance_id"
-            height="calc(100vh - 226px)"
-            border
-            @selection-change="selectedRows = $event"
-          >
-            <el-table-column type="selection" width="48" :selectable="isSelectable" />
-            <el-table-column label="成本分析号" min-width="210">
-              <template #default="{ row }">
-                <span class="mono strong">{{ row.quotation_code }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="BPM" min-width="170">
-              <template #default="{ row }">
-                <span class="mono link-text">{{ row.bpm_no || "-" }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="95">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.review_status === 'quoted' ? 'success' : 'warning'" effect="plain">
-                  {{ row.review_status === "quoted" ? "已报价" : "待报价" }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="报价日期" width="115" prop="quote_date" />
-            <el-table-column label="上传人" width="110" prop="upload_user" />
-            <el-table-column label="上传时间" width="165">
-              <template #default="{ row }">{{ formatTime(row.create_time) }}</template>
-            </el-table-column>
-            <el-table-column label="品名规格" min-width="260" prop="product_spec" show-overflow-tooltip />
-          </el-table>
+      <aside class="batch-param-panel">
+        <div class="batch-param-head">
+          <h2>批量审价参数</h2>
+          <p>将覆盖已选 {{ selectedRows.length }} 张成本分析表的本 BPM 实例参数</p>
         </div>
-
-        <aside class="batch-actions-panel">
-          <h2>批量设置铜价</h2>
-          <el-form class="batch-action-form" label-position="top" @submit.prevent>
-            <el-form-item label="铜价（元/吨）" :required="true">
-              <el-input-number v-model="calcParams.copper_price" :min="0" :step="0.01" controls-position="right" />
+        <el-form class="batch-param-form" label-position="top" @submit.prevent>
+          <div class="param-group">
+            <h3>基础价格</h3>
+            <el-form-item label="铜价（元/吨）" required>
+              <el-input-number v-model="form.copper_price" :min="0" :step="100" controls-position="right" />
             </el-form-item>
             <el-form-item label="铜杆加工费">
-              <el-input-number v-model="calcParams.copper_rod_process_fee" :min="0" :step="0.01" controls-position="right" />
+              <el-input-number v-model="form.copper_rod_process_fee" :min="0" :step="1" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="运输费（RMB/KG）">
+              <el-input-number v-model="form.transport_fee" :min="0" :step="0.0001" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="其他费用">
+              <el-input-number v-model="form.other_fee" :min="0" :step="0.01" controls-position="right" />
+            </el-form-item>
+          </div>
+
+          <div class="param-group">
+            <h3>报价参数</h3>
+            <el-form-item label="净利率">
+              <el-input-number v-model="form.net_profit_rate" :min="0" :max="0.9999" :step="0.0001" controls-position="right" />
             </el-form-item>
             <el-form-item label="增值税率">
-              <el-input-number v-model="calcParams.vat_rate" :min="0" :step="0.0001" controls-position="right" />
+              <el-input-number v-model="form.vat_rate" :min="0" :step="0.0001" controls-position="right" />
             </el-form-item>
-            <el-checkbox v-model="calculateAfterSave">设置后立即完整计算导体和售价</el-checkbox>
-            <el-button class="wide" type="success" :loading="saving" @click="batchSetCopper">批量设置</el-button>
-            <el-button class="wide no-margin" type="danger" plain :loading="deleting" @click="batchDelete">批量删除</el-button>
-          </el-form>
-
-          <div class="batch-hint">
-            <strong>操作范围</strong>
-            <p>批量操作按 BPM 实例执行；同一个成本分析号挂在其它 BPM 下时不会被一起修改。</p>
-            <p>已报价记录只读展示，不能勾选。</p>
+            <el-form-item label="订单米数" required>
+              <el-input-number v-model="form.order_meterage" :min="0" :step="1000" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="营业费用率">
+              <el-input-number v-model="form.operating_expense_rate" :min="0" :step="0.0001" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="月结利息">
+              <el-input-number v-model="form.monthly_interest" :min="0" :step="0.0001" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="企税税率">
+              <el-input-number v-model="form.corporate_tax_rate" :min="0" :step="0.0001" controls-position="right" />
+            </el-form-item>
           </div>
-        </aside>
-      </section>
+
+          <div class="param-group">
+            <h3>通关/附加</h3>
+            <el-form-item label="报关费">
+              <el-input-number v-model="form.customs_fee" :min="0" :step="1" controls-position="right" />
+            </el-form-item>
+          </div>
+        </el-form>
+
+        <div class="batch-action-buttons">
+          <el-button class="wide" type="primary" plain :loading="saving" @click="applyParams(false)">仅保存参数</el-button>
+          <el-button class="wide no-margin" type="success" :loading="saving" @click="applyParams(true)">保存参数并一键计算</el-button>
+          <el-button class="wide no-margin" type="danger" plain :loading="deleting" @click="batchDelete">删除已选待报价</el-button>
+        </div>
+      </aside>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from "vue";
+import { computed, nextTick, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   assertReviewerSession,
@@ -120,6 +164,8 @@ import type { BatchResult, QuoteItem } from "./types";
 
 assertReviewerSession();
 
+type RowStatus = { type: "success" | "warning" | "danger" | "info"; text: string };
+
 const reviewerName = sessionStorage.getItem("displayName") || sessionStorage.getItem("userName") || "";
 const bpmNo = ref("");
 const statusText = ref("");
@@ -128,16 +174,27 @@ const saving = ref(false);
 const deleting = ref(false);
 const items = ref<QuoteItem[]>([]);
 const selectedRows = ref<QuoteItem[]>([]);
+const rowStatusMap = reactive<Record<number, RowStatus>>({});
 const tableRef = ref<{
   clearSelection: () => void;
   toggleRowSelection: (row: QuoteItem, selected?: boolean) => void;
 } | null>(null);
-const calculateAfterSave = ref(false);
-const calcParams = reactive({
+
+const form = reactive({
   copper_price: null as number | null,
   copper_rod_process_fee: 1055,
+  transport_fee: 0,
+  other_fee: 0,
+  net_profit_rate: 0.08,
+  customs_fee: 0,
   vat_rate: 1.13,
+  order_meterage: null as number | null,
+  operating_expense_rate: 0.01,
+  monthly_interest: 0.00002,
+  corporate_tax_rate: 0.15,
 });
+
+const selectableRows = computed(() => items.value.filter(isSelectable));
 
 function logout(): void {
   sessionStorage.clear();
@@ -154,10 +211,13 @@ async function loadQuotations(): Promise<void> {
   loading.value = true;
   statusText.value = "查询中...";
   selectedRows.value = [];
+  Object.keys(rowStatusMap).forEach((key) => delete rowStatusMap[Number(key)]);
   try {
     const data = await fetchQuotationsByBpm(code);
     items.value = data.items || [];
-    statusText.value = `共 ${items.value.length} 条，待报价 ${items.value.filter(isSelectable).length} 条`;
+    statusText.value = `共 ${items.value.length} 条，待报价 ${selectableRows.value.length} 条`;
+    await nextTick();
+    selectAllPending();
   } catch (err: any) {
     statusText.value = "";
     ElMessage.error("查询失败：" + err.message);
@@ -172,37 +232,66 @@ function isSelectable(row: QuoteItem): boolean {
 
 function selectAllPending(): void {
   tableRef.value?.clearSelection();
-  items.value.filter(isSelectable).forEach((row) => tableRef.value?.toggleRowSelection(row, true));
+  selectableRows.value.forEach((row) => tableRef.value?.toggleRowSelection(row, true));
+}
+
+function clearSelection(): void {
+  tableRef.value?.clearSelection();
+  selectedRows.value = [];
 }
 
 function selectedInstanceIds(): number[] {
   return selectedRows.value.map((row) => Number(row.instance_id)).filter((id) => Number.isFinite(id) && id > 0);
 }
 
-async function batchSetCopper(): Promise<void> {
-  const instanceIds = selectedInstanceIds();
-  if (!instanceIds.length) {
+function rowStatus(row: QuoteItem): RowStatus | null {
+  const id = Number(row.instance_id);
+  return Number.isFinite(id) ? rowStatusMap[id] || null : null;
+}
+
+function validateForm(calculateAfterSave: boolean): boolean {
+  if (!selectedInstanceIds().length) {
     ElMessage.warning("请选择待报价成本分析表");
-    return;
+    return false;
   }
-  if (!calcParams.copper_price || calcParams.copper_price <= 0) {
+  if (!form.copper_price || form.copper_price <= 0) {
     ElMessage.warning("请填写大于 0 的铜价");
-    return;
+    return false;
   }
+  if (calculateAfterSave && (!form.order_meterage || form.order_meterage <= 0)) {
+    ElMessage.warning("保存并计算需要填写大于 0 的订单米数");
+    return false;
+  }
+  return true;
+}
+
+async function applyParams(calculateAfterSave: boolean): Promise<void> {
+  if (!validateForm(calculateAfterSave)) return;
+  const instanceIds = selectedInstanceIds();
   saving.value = true;
+  markSelected({ type: "info", text: "处理中" });
   try {
     const data = await batchSaveCalcParams({
       instance_ids: instanceIds,
       quotation_codes: [],
-      copper_price: String(calcParams.copper_price),
-      copper_rod_process_fee: String(calcParams.copper_rod_process_fee),
-      vat_rate: String(calcParams.vat_rate),
-      calculate_after_save: calculateAfterSave.value,
+      copper_price: String(form.copper_price),
+      copper_rod_process_fee: String(form.copper_rod_process_fee),
+      transport_fee: String(form.transport_fee),
+      other_fee: String(form.other_fee),
+      net_profit_rate: String(form.net_profit_rate),
+      customs_fee: String(form.customs_fee),
+      vat_rate: String(form.vat_rate),
+      order_meterage: form.order_meterage === null ? null : String(form.order_meterage),
+      operating_expense_rate: String(form.operating_expense_rate),
+      monthly_interest: String(form.monthly_interest),
+      corporate_tax_rate: String(form.corporate_tax_rate),
+      calculate_after_save: calculateAfterSave,
     });
-    showBatchResult(data, calculateAfterSave.value ? "批量设置并计算完成" : "批量设置完成");
-    await loadQuotations();
+    applyResultStatus(data, calculateAfterSave);
+    showBatchResult(data, calculateAfterSave ? "保存参数并计算完成" : "保存参数完成");
   } catch (err: any) {
-    ElMessage.error("批量设置失败：" + err.message);
+    markSelected({ type: "danger", text: "失败" });
+    ElMessage.error("批量保存失败：" + err.message);
   } finally {
     saving.value = false;
   }
@@ -231,6 +320,25 @@ async function batchDelete(): Promise<void> {
   } finally {
     deleting.value = false;
   }
+}
+
+function markSelected(status: RowStatus): void {
+  selectedInstanceIds().forEach((id) => {
+    rowStatusMap[id] = status;
+  });
+}
+
+function applyResultStatus(data: BatchResult, calculateAfterSave: boolean): void {
+  const skippedCodes = new Set((data.skipped || []).map((item) => item.quotation_code || ""));
+  selectedRows.value.forEach((row) => {
+    const id = Number(row.instance_id);
+    if (!Number.isFinite(id)) return;
+    if (skippedCodes.has(row.quotation_code)) {
+      rowStatusMap[id] = { type: "danger", text: "失败" };
+    } else {
+      rowStatusMap[id] = calculateAfterSave ? { type: "success", text: "计算成功" } : { type: "success", text: "已更新" };
+    }
+  });
 }
 
 function showBatchResult(data: BatchResult, title: string): void {

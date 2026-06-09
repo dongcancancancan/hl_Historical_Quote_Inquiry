@@ -201,7 +201,7 @@ const savedCalcParams = reactive<CalcParams>({
   copper_rod_process_fee: "1055",
   vat_rate: "1.13",
 });
-const calcInputErrors = reactive<Record<keyof CalcParams, string>>({
+const calcInputErrors = reactive<Partial<Record<keyof CalcParams, string>>>({
   copper_price: "",
   copper_rod_process_fee: "",
   vat_rate: "",

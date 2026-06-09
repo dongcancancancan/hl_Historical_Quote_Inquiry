@@ -68,6 +68,14 @@ class QuotationCalcParamRequest(BaseModel):
     copper_price: str | int | float | None = None
     copper_rod_process_fee: str | int | float = "1055"
     vat_rate: str | int | float = "1.13"
+    transport_fee: str | int | float | None = None
+    other_fee: str | int | float | None = None
+    net_profit_rate: str | int | float | None = None
+    customs_fee: str | int | float | None = None
+    order_meterage: str | int | float | None = None
+    operating_expense_rate: str | int | float | None = None
+    monthly_interest: str | int | float | None = None
+    corporate_tax_rate: str | int | float | None = None
 
 
 class BatchCalcParamRequest(QuotationCalcParamRequest):
@@ -379,7 +387,7 @@ def save_quotation_calc_params(
         raise HTTPException(status_code=403, detail="仅审价科账号可以维护计算参数")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     try:
-        return update_instance_calc_params(db, quotation, instance, req.model_dump(), user.display_name)
+        return update_instance_calc_params(db, quotation, instance, req.model_dump(exclude_unset=True), user.display_name)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -416,7 +424,7 @@ def save_batch_calc_params(
             continue
         quotation, instance = context
         try:
-            update_instance_calc_params(db, quotation, instance, req.model_dump(), user.display_name)
+            update_instance_calc_params(db, quotation, instance, req.model_dump(exclude_unset=True), user.display_name)
             updated += 1
             if req.calculate_after_save:
                 sync_instance_calc_params_to_engine(db, quotation, instance, user.display_name)

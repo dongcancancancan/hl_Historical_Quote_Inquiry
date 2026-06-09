@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -155,6 +155,14 @@ def ensure_bpm_instance(
         copper_price=params.copper_price if params else None,
         copper_rod_process_fee=params.copper_rod_process_fee if params else DEFAULT_COPPER_ROD_PROCESS_FEE,
         vat_rate=params.vat_rate if params else DEFAULT_VAT_RATE,
+        transport_fee=quotation.transport_fee,
+        other_fee=quotation.other_fee,
+        net_profit_rate=quotation.net_profit_rate,
+        customs_fee=quotation.customs_fee,
+        order_meterage=quotation.order_meterage,
+        operating_expense_rate=quotation.operating_expense_rate,
+        monthly_interest=quotation.monthly_interest,
+        corporate_tax_rate=quotation.corporate_tax_rate,
         cost=quotation.cost,
         profit_selling_price=quotation.profit_selling_price,
         non_profit_price=quotation.non_profit_price,
@@ -231,6 +239,14 @@ def serialize_instance_calc_params(
                 "copper_price": _decimal_text(instance.copper_price),
                 "copper_rod_process_fee": _decimal_text(instance.copper_rod_process_fee or DEFAULT_COPPER_ROD_PROCESS_FEE),
                 "vat_rate": _decimal_text(instance.vat_rate or DEFAULT_VAT_RATE),
+                "transport_fee": _decimal_text(instance.transport_fee if instance.transport_fee is not None else quotation.transport_fee),
+                "other_fee": _decimal_text(instance.other_fee if instance.other_fee is not None else quotation.other_fee),
+                "net_profit_rate": _decimal_text(instance.net_profit_rate if instance.net_profit_rate is not None else quotation.net_profit_rate),
+                "customs_fee": _decimal_text(instance.customs_fee if instance.customs_fee is not None else quotation.customs_fee),
+                "order_meterage": _decimal_text(instance.order_meterage if instance.order_meterage is not None else quotation.order_meterage),
+                "operating_expense_rate": _decimal_text(instance.operating_expense_rate if instance.operating_expense_rate is not None else quotation.operating_expense_rate),
+                "monthly_interest": _decimal_text(instance.monthly_interest if instance.monthly_interest is not None else quotation.monthly_interest),
+                "corporate_tax_rate": _decimal_text(instance.corporate_tax_rate if instance.corporate_tax_rate is not None else quotation.corporate_tax_rate),
                 "updater": instance.updater or data.get("updater") or "",
                 "update_time": instance.update_time.isoformat() if instance.update_time else data.get("update_time"),
             }
@@ -250,6 +266,7 @@ def update_instance_calc_params(
         instance.copper_price = params.copper_price
         instance.copper_rod_process_fee = params.copper_rod_process_fee
         instance.vat_rate = params.vat_rate
+        _apply_review_params_to_instance(instance, quotation, data)
         instance.updater = operator
         instance.update_time = datetime.now()
         db.commit()
@@ -272,6 +289,7 @@ def sync_instance_calc_params_to_engine(
         "vat_rate": _decimal_text(instance.vat_rate or DEFAULT_VAT_RATE),
     }
     update_calc_params(db, quotation, data, operator)
+    _apply_instance_review_params_to_quotation(quotation, instance)
 
 
 def snapshot_instance_from_quotation(
@@ -288,6 +306,7 @@ def snapshot_instance_from_quotation(
     instance.profit_selling_price = quotation.profit_selling_price
     instance.non_profit_price = quotation.non_profit_price
     instance.final_selling_price = quotation.final_selling_price
+    _apply_quotation_review_params_to_instance(instance, quotation)
     instance.updater = operator
     instance.update_time = now
 
@@ -339,3 +358,48 @@ def _decimal_text(value) -> str | None:
     if value is None:
         return None
     return f"{Decimal(value):f}".rstrip("0").rstrip(".") or "0"
+
+
+REVIEW_PARAM_FIELDS = [
+    "transport_fee",
+    "other_fee",
+    "net_profit_rate",
+    "customs_fee",
+    "order_meterage",
+    "operating_expense_rate",
+    "monthly_interest",
+    "corporate_tax_rate",
+]
+
+
+def _optional_decimal(value):
+    if value in (None, ""):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("审价参数格式不正确") from exc
+    if result < 0:
+        raise ValueError("审价参数不能小于 0")
+    return result
+
+
+def _apply_review_params_to_instance(instance: QuotationBpmInstance, quotation: QuotationMain, data: dict) -> None:
+    for field in REVIEW_PARAM_FIELDS:
+        if field in data:
+            setattr(instance, field, _optional_decimal(data.get(field)))
+        elif getattr(instance, field, None) is None:
+            setattr(instance, field, getattr(quotation, field, None))
+
+
+def _apply_instance_review_params_to_quotation(quotation: QuotationMain, instance: QuotationBpmInstance) -> None:
+    for field in REVIEW_PARAM_FIELDS:
+        value = getattr(instance, field, None)
+        if value is not None:
+            setattr(quotation, field, value)
+    quotation.vat_rate = instance.vat_rate or quotation.vat_rate
+
+
+def _apply_quotation_review_params_to_instance(instance: QuotationBpmInstance, quotation: QuotationMain) -> None:
+    for field in REVIEW_PARAM_FIELDS:
+        setattr(instance, field, getattr(quotation, field, None))
