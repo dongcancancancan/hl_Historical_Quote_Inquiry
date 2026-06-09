@@ -1392,9 +1392,6 @@ def delete_quotation(
         instance, q = row
         if instance.review_status == REVIEW_QUOTED:
             return False
-        instance.deleted = True
-        instance.updater = creator_name
-        instance.update_time = datetime.now()
         remaining = (
             db.query(QuotationBpmInstance)
             .filter(
@@ -1406,7 +1403,11 @@ def delete_quotation(
         )
         if remaining == 0:
             _delete_quotation_fk_children(db, q.id)
-            db.delete(q)
+            db.execute(text("DELETE FROM quotation_main WHERE id = :quotation_id"), {"quotation_id": q.id})
+        else:
+            instance.deleted = True
+            instance.updater = creator_name
+            instance.update_time = datetime.now()
         db.commit()
         logger.info(f"[{quotation_code}] BPM实例 {instance_id} 已由 {creator_name} 删除 (admin={is_admin})")
         return True
@@ -1422,11 +1423,11 @@ def delete_quotation(
     q = db.query(QuotationMain).filter(*filters).first()
     if not q:
         return False
-    from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
+    from app.services.excel_preview_service import get_review_status
     if get_review_status(q) == REVIEW_QUOTED:
         return False
     _delete_quotation_fk_children(db, q.id)
-    db.delete(q)
+    db.execute(text("DELETE FROM quotation_main WHERE id = :quotation_id"), {"quotation_id": q.id})
     db.commit()
     logger.info(f"[{quotation_code}] 已由 {creator_name} 删除 (admin={is_admin})")
     return True

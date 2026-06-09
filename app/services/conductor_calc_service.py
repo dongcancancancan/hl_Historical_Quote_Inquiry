@@ -279,11 +279,14 @@ def _is_conductor_row(item: QuotationMaterial) -> bool:
     process_name = item.process_name or ""
     if "芯绞" in process_name:
         return False
+    if COPPER_CODE_RE.search(text):
+        return True
+    if _looks_like_external_material_code(item.process_code):
+        return False
     return (
         "铜" in process_name
         or "导体" in process_name
         or "编织" in process_name
-        or bool(COPPER_CODE_RE.search(text))
     )
 
 
@@ -312,12 +315,26 @@ def _match_process_fee_rows(
             if _normalize_process_name(process.process_name) == material_name
         ]
         if exact:
-            return exact
+            return [exact[0]]
     if _is_braiding_material(material):
-        return [process for process in processes if _is_braiding_process(process)]
+        return _first_process(processes, _is_braiding_process)
     if _is_copper_material(material):
-        return [process for process in processes if _is_copper_process(process)]
-    return [process for process in processes if _is_conductor_process(process)]
+        return _first_process(processes, _is_copper_process)
+    return _first_process(processes, _is_conductor_process)
+
+
+def _first_process(processes: list[QuotationProcessFee], predicate) -> list[QuotationProcessFee]:
+    for process in processes:
+        if predicate(process):
+            return [process]
+    return []
+
+
+def _looks_like_external_material_code(value) -> bool:
+    raw_code = str(value or "").strip().upper()
+    if not raw_code or raw_code in {"新开发", "NULL", "NONE", "-"}:
+        return False
+    return not bool(COPPER_CODE_RE.search(raw_code))
 
 
 def _normalize_process_name(value) -> str:
