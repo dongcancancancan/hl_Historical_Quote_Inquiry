@@ -710,26 +710,73 @@ def _quotation_exists(db: Session, quotation_code: str, tenant_id: str) -> bool:
 
 
 def _delete_quotation_fk_children(db: Session, quotation_id: int) -> None:
-    """Delete all direct children that reference quotation_main before deleting main."""
-    rows = db.execute(text("""
+    """Delete FK children recursively before deleting quotation_main."""
+    _delete_fk_children(db, "quotation_main", quotation_id)
+
+
+def _delete_fk_children(
+    db: Session,
+    parent_table: str,
+    parent_id: int,
+    stack: tuple[tuple[str, int], ...] = (),
+) -> None:
+    current = (parent_table, int(parent_id))
+    if current in stack:
+        return
+    child_refs = db.execute(text("""
         SELECT
             OBJECT_SCHEMA_NAME(fkc.parent_object_id) AS child_schema,
             OBJECT_NAME(fkc.parent_object_id) AS child_table,
-            pc.name AS child_column
+            pc.name AS child_column,
+            pkc.name AS child_pk_column
         FROM sys.foreign_key_columns fkc
         JOIN sys.columns pc
           ON pc.object_id = fkc.parent_object_id
          AND pc.column_id = fkc.parent_column_id
-        WHERE OBJECT_NAME(fkc.referenced_object_id) = 'quotation_main'
+        OUTER APPLY (
+            SELECT TOP 1 c.name
+            FROM sys.indexes i
+            JOIN sys.index_columns ic
+              ON ic.object_id = i.object_id
+             AND ic.index_id = i.index_id
+            JOIN sys.columns c
+              ON c.object_id = ic.object_id
+             AND c.column_id = ic.column_id
+            WHERE i.object_id = fkc.parent_object_id
+              AND i.is_primary_key = 1
+            ORDER BY ic.key_ordinal
+        ) pkc
+        WHERE OBJECT_NAME(fkc.referenced_object_id) = :parent_table
         ORDER BY OBJECT_NAME(fkc.parent_object_id)
-    """)).mappings().all()
-    for row in rows:
-        schema = str(row["child_schema"]).replace("]", "]]")
-        table = str(row["child_table"]).replace("]", "]]")
-        column = str(row["child_column"]).replace("]", "]]")
+    """), {
+        "parent_table": parent_table,
+    }).mappings().all()
+
+    next_stack = stack + (current,)
+    for row in child_refs:
+        child_schema = str(row["child_schema"])
+        child_table = str(row["child_table"])
+        child_column = str(row["child_column"])
+        child_pk_column = str(row["child_pk_column"] or "id")
+        escaped_schema = child_schema.replace("]", "]]")
+        escaped_table = child_table.replace("]", "]]")
+        escaped_column = child_column.replace("]", "]]")
+        escaped_pk = child_pk_column.replace("]", "]]")
+
+        child_ids = db.execute(
+            text(
+                f"SELECT [{escaped_pk}] AS child_id "
+                f"FROM [{escaped_schema}].[{escaped_table}] "
+                f"WHERE [{escaped_column}] = :parent_id"
+            ),
+            {"parent_id": parent_id},
+        ).scalars().all()
+        for child_id in child_ids:
+            if child_id is not None:
+                _delete_fk_children(db, child_table, int(child_id), next_stack)
         db.execute(
-            text(f"DELETE FROM [{schema}].[{table}] WHERE [{column}] = :quotation_id"),
-            {"quotation_id": quotation_id},
+            text(f"DELETE FROM [{escaped_schema}].[{escaped_table}] WHERE [{escaped_column}] = :parent_id"),
+            {"parent_id": parent_id},
         )
 
 

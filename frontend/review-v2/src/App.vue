@@ -92,7 +92,7 @@
             <el-button size="small" type="warning" :loading="calculationInFlight" @click="calculateFullPrice">
               一键计算最终售价
             </el-button>
-            <el-button size="small" type="primary" plain @click="runDiagnosis">智能诊断</el-button>
+            <el-button size="small" type="primary" plain @click="runDiagnosis">AI 辅助分析</el-button>
             <el-button size="small" type="warning" plain @click="showAllTraces">查看计算过程</el-button>
             <el-dropdown trigger="click">
               <el-button size="small">
@@ -446,15 +446,11 @@ async function runCalculation(message: string, type: "conductor" | "glue" | "ful
     if (type === "full-price") {
       await Promise.all([loadHistory(), loadPreview()]);
     }
-    if (isLocalCalculationIssue(lastCalculationError.value)) {
-      renderLocalDiagnosis(lastCalculationError.value);
-      setCalcStatus(lastCalculationError.value, "danger");
-      return;
-    }
-    setCalcStatus("", "info");
-    await runDiagnosis(lastCalculationError.value);
+    renderRuleDiagnosis(lastCalculationError.value);
     if (type === "full-price") {
-      setCalcStatus("已保留可计算结果，最终售价未生成；请查看智能诊断。", "danger");
+      setCalcStatus("已保留可计算结果，最终售价未生成；请查看右侧异常提示。", "danger");
+    } else {
+      setCalcStatus(lastCalculationError.value, "danger");
     }
   } finally {
     calculationInFlight.value = false;
@@ -535,12 +531,12 @@ async function runDiagnosis(errorMessage = ""): Promise<void> {
     return;
   }
   diagnosisLoading.value = true;
-  setCalcStatus("智能诊断中...", "info");
+  setCalcStatus("AI 辅助分析中...", "info");
   try {
     diagnosisCache[selectedCode.value] = await diagnose(selectedCode.value, selectedInstanceId.value, errorMessage || lastCalculationError.value);
     setCalcStatus("", "info");
   } catch (err: any) {
-    ElMessage.error("智能诊断失败：" + err.message);
+    ElMessage.error("AI 辅助分析失败：" + err.message);
   } finally {
     diagnosisLoading.value = false;
   }
@@ -552,26 +548,20 @@ function renderLocalDiagnosis(message: string): void {
   diagnosisCache[selectedCode.value] = {
     mode: "local",
     quotation_code: selectedCode.value,
-    summary: `当前问题：${message}\n处理方式：请在上方参数栏补充或修正，系统会自动保存。保存成功后再重新计算。\n这类输入态问题不调用 LLM 诊断。`,
+    summary: `当前问题：${message}\n处理方式：请在上方参数栏补充或修正，系统会自动保存。保存成功后再重新计算。\n系统没有调用 AI。`,
     skills: [],
   };
 }
 
-function isLocalCalculationIssue(message: string): boolean {
-  return [
-    "请先填写并保存铜价",
-    "铜价未填写",
-    "铜价格式",
-    "铜价不能",
-    "铜价必须",
-    "铜杆加工费格式",
-    "铜杆加工费不能",
-    "铜杆加工费必须",
-    "增值税率格式",
-    "增值税率不能",
-    "增值税率必须",
-    "计算参数保存失败",
-  ].some((keyword) => message.includes(keyword));
+function renderRuleDiagnosis(message: string): void {
+  if (!selectedCode.value) return;
+  lastCalculationError.value = message;
+  diagnosisCache[selectedCode.value] = {
+    mode: "rule",
+    quotation_code: selectedCode.value,
+    summary: `计算未完成：${message}\n处理方式：请根据缺失的材料单价、制程公式或审价参数维护基础数据；已能计算的结果会保留。处理后重新点击一键计算。\n系统没有自动调用 AI；需要自然语言解释时，可点击“AI 辅助分析”。`,
+    skills: [],
+  };
 }
 
 function enableEditing(): void {

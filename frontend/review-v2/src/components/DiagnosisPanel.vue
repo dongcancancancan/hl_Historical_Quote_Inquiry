@@ -2,19 +2,19 @@
   <aside class="diagnosis-panel">
     <div class="panel-head">
       <div>
-        <strong>智能诊断</strong>
-        <p>{{ selectedCode ? selectedCode : "选择报价单后可诊断计算异常" }}</p>
+        <strong>计算状态</strong>
+        <p>{{ selectedCode ? selectedCode : "选择报价单后查看计算状态" }}</p>
       </div>
       <el-button size="small" type="primary" plain @click="$emit('diagnose')">
-        {{ diagnosis ? "重新诊断" : "智能诊断" }}
+        {{ diagnosis?.mode === "llm" ? "重新 AI 分析" : "AI 辅助分析" }}
       </el-button>
     </div>
     <el-scrollbar class="diagnosis-body">
-      <div v-if="loading" class="diagnosis-loading">诊断中，请稍候...</div>
-      <el-empty v-else-if="!selectedCode" description="暂无诊断结果" :image-size="68" />
+      <div v-if="loading" class="diagnosis-loading">AI 分析中，请稍候...</div>
+      <el-empty v-else-if="!selectedCode" description="暂无计算状态" :image-size="68" />
       <div v-else-if="!diagnosis" class="diagnosis-placeholder">
-        <el-alert title="还没有诊断结果，点击智能诊断会调用诊断服务。" type="info" :closable="false" />
-        <p>铜价未填、参数未保存、格式错误这类输入态问题会直接在前端提示；材料、制程或公式链路问题才会进入智能诊断。</p>
+        <el-alert title="还没有计算异常。计算失败后这里会直接展示规则提示。" type="info" :closable="false" />
+        <p>系统默认不调用 AI；只有点击“AI 辅助分析”时，才会调用一次辅助分析服务。</p>
       </div>
       <div v-else class="diagnosis-result">
         <div class="diagnosis-card">
@@ -66,9 +66,9 @@ defineEmits<{
 }>();
 
 const modeText = computed(() => {
-  if (props.diagnosis?.mode === "llm") return "LLM 辅助诊断";
+  if (props.diagnosis?.mode === "llm") return "AI 辅助分析";
   if (props.diagnosis?.mode === "local") return "前端即时提示";
-  return "规则诊断";
+  return "规则异常提示";
 });
 
 const summaryLines = computed(() => {

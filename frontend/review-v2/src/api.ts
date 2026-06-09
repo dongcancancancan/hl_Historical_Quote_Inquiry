@@ -59,7 +59,16 @@ function headers(json = false): HeadersInit {
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
-  const data = await res.json();
+  const text = await res.text();
+  let data: any = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!res.ok) throw new Error(text);
+      throw new Error("服务返回格式异常");
+    }
+  }
   if (!res.ok) throw new Error(formatErrorDetail(data.detail || data.message || "请求失败"));
   return data as T;
 }

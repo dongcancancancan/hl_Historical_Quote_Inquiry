@@ -322,10 +322,17 @@ def remove_quotation(
     user: UserContext = Depends(get_current_user),
 ):
     """删除指定成本分析号（管理员可删任意，普通用户仅可删自己）"""
-    ok = delete_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, instance_id=instance_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限删除")
-    return {"ok": True}
+    try:
+        ok = delete_quotation(db, code, user.tenant_id, user.display_name, user.is_admin, instance_id=instance_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="未找到该成本分析号或无权限删除")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Delete quotation failed for %s instance_id=%s", code, instance_id)
+        raise HTTPException(status_code=500, detail=f"删除失败：{exc}")
 
 
 @router.get("/quotation/preview", response_class=HTMLResponse)
