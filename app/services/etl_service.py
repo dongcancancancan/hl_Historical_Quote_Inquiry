@@ -3,7 +3,7 @@ import re
 import uuid
 import time
 import json
-import shutil
+
 import asyncio
 import logging
 import hashlib
@@ -12,7 +12,7 @@ from datetime import datetime
 from openpyxl import load_workbook
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from fastapi import UploadFile
+
 from openai import AsyncOpenAI
 
 from app.models.calc_param import QuotationCalcParam
@@ -700,13 +700,6 @@ def _enrich_extracted(data: dict, product_spec: str) -> None:
             if found:
                 mat["material_code"] = found[0]
 
-
-def _quotation_exists(db: Session, quotation_code: str, tenant_id: str) -> bool:
-    """检查同租户下成本分析号是否已存在"""
-    return db.query(QuotationMain).filter(
-        QuotationMain.quotation_code == quotation_code,
-        QuotationMain.tenant_id == tenant_id,
-    ).first() is not None
 
 
 def _delete_quotation_fk_children(db: Session, quotation_id: int) -> None:
@@ -1433,61 +1426,3 @@ def delete_quotation(
     return True
 
 
-# 保留同步版本，兼容旧的调用方式
-def process_and_store_excel(file: UploadFile, db: Session, tenant_id: str, username: str, bpm_no: str = "") -> dict:
-    """同步版：保存文件 + 扫描 + 串行 LLM + 写入（兼容旧接口）"""
-    file_ext = os.path.splitext(file.filename)[1]
-    unique_filename = f"{uuid.uuid4().hex}{file_ext}"
-    saved_path = os.path.join(UPLOAD_DIR, unique_filename)
-
-    with open(saved_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    logger.info(f"Saved original excel to {saved_path}")
-
-    blocks = scan_quotations(saved_path)
-    processed_count = 0
-    seen_codes: set[str] = set()
-
-    for block in blocks:
-        try:
-            t0 = time.time()
-            data = asyncio.run(_extract_one_async(
-                block, asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)
-            ))
-            t_llm = time.time() - t0
-
-            # 批次内去重
-            code = data.get("quotation_no") or f"AUTO-{uuid.uuid4().hex[:6]}"
-            if code in seen_codes:
-                logger.warning(f"[{code}] 批次内重复，跳过")
-                continue
-            seen_codes.add(code)
-
-            t1 = time.time()
-            data = _patch_header_fields_from_excel(data, saved_path, block)
-            data = _patch_cost_summary_from_excel(data, saved_path, block)
-            quotation_code = _write_one_quotation(
-                db,
-                data,
-                tenant_id,
-                username,
-                saved_path,
-                bpm_no=bpm_no,
-                content_hash=_block_content_hash(block),
-            )
-            t_db = time.time() - t1
-
-            if quotation_code:
-                logger.info(f"[{quotation_code}] 耗时: LLM={t_llm:.1f}s  DB={t_db:.1f}s")
-                db.commit()
-                processed_count += 1
-            else:
-                logger.info(f"[{code}] 已存在，跳过")
-
-        except Exception as e:
-            db.rollback()
-            import traceback
-            logger.error(f"Error parsing quotation at row {block.row_idx}: {str(e)}\n{traceback.format_exc()}")
-
-    return {"status": "success", "processed_quotations": processed_count, "saved_file": saved_path}

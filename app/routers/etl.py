@@ -2,15 +2,17 @@ import os
 import uuid
 import json
 import time
+import csv
+import io
 import shutil
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.core.auth import UserContext, get_current_user
 from app.models.quotation import QuotationBpmInstance, QuotationMain
 from app.services.etl_service import scan_quotations, process_excel_streaming, get_upload_history, delete_quotation
@@ -37,9 +39,18 @@ from app.services.price_summary_calc_service import calculate_price_summary, lis
 from app.services.full_price_calc_service import calculate_full_price
 from app.services.calculation_skill_engine import list_calculation_skills
 from app.services.calculation_diagnosis_service import diagnose_calculation
+from app.services.batch_quote_export_service import render_general_batch_quote_excel
 from app.services.excel_service import render_quote_snapshot_excel, render_quotation_excel
 from app.services.calculation_run_service import latest_successful_run, record_successful_calculation_run
 from app.services.quote_snapshot_service import create_quote_snapshot, get_active_snapshot, snapshot_dict
+from app.services.routing_decision_service import (
+    get_routing_decision_run,
+    list_routing_decision_runs,
+    serialize_routing_decision_run,
+    summarize_routing_decision_runs,
+    update_routing_human_review,
+)
+from app.services.routing_engine_service import route_calculation_plan, route_calculation_skill, run_routing_dry_run_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,12 +100,30 @@ class BatchDeleteRequest(BaseModel):
     instance_ids: list[int] | None = None
 
 
+class BatchQuoteExportRequest(BaseModel):
+    instance_ids: list[int] = Field(default_factory=list)
+
+
 class CopperScenarioRequest(BaseModel):
     bpm_no: str
 
 
 class CalculationDiagnosisRequest(BaseModel):
     error_message: str | None = None
+
+
+class RoutingTestRequest(BaseModel):
+    route_scene: str = "fallback_skill_route"
+    trigger_source: str = "manual_test"
+    error_message: str | None = None
+    focus_material_ids: list[int] = Field(default_factory=list)
+    focus_process_ids: list[int] = Field(default_factory=list)
+
+
+class RoutingReviewRequest(BaseModel):
+    is_correct: bool | None = None
+    expected_skill: str | None = None
+    comment: str | None = None
 
 
 def _get_context_or_404(
@@ -483,6 +512,30 @@ def remove_quotations_batch(
     return {"deleted": deleted, "skipped": skipped}
 
 
+@router.post("/quotation/export-batch-quote")
+def export_batch_quote(
+    req: BatchQuoteExportRequest,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以导出报价单")
+    try:
+        buffer, filename = render_general_batch_quote_excel(
+            db=db,
+            instance_ids=req.instance_ids,
+            operator=user.display_name,
+        )
+        encoded_filename = quote(filename)
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.ms-excel",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/quotation/copper-scenarios")
 def calculate_copper_scenarios(
     req: CopperScenarioRequest,
@@ -606,6 +659,7 @@ def calculate_quotation_price_summary(
 def calculate_quotation_full_price(
     code: str = "",
     instance_id: int | None = None,
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     user: UserContext = Depends(get_current_user),
 ):
@@ -625,9 +679,27 @@ def calculate_quotation_full_price(
         result["calculation_run_id"] = run.id
         return result
     except ValueError as exc:
+        route_error_message = str(exc)
         _restore_instance_calculation(quotation, instance, old_tags)
         db.commit()
-        raise HTTPException(status_code=400, detail=str(exc))
+        if background_tasks is not None:
+            background_tasks.add_task(
+                _record_failure_routing_dry_run,
+                quotation_id=quotation.id,
+                instance_id=instance.id if instance else None,
+                operator=user.display_name,
+                error_message=route_error_message,
+            )
+            logger.info(
+                "scheduled failure routing dry-run for quotation %s instance %s",
+                quotation.quotation_code,
+                instance.id if instance else None,
+            )
+        return JSONResponse(
+            status_code=400,
+            content={"detail": route_error_message},
+            background=background_tasks,
+        )
 
 
 @router.get("/quotation/calculate/skills")
@@ -651,6 +723,261 @@ async def diagnose_quotation_calculation(
         raise HTTPException(status_code=403, detail="仅审价科账号可以执行计算诊断")
     quotation, instance = _get_context_or_404(db, user, code, instance_id)
     return await diagnose_calculation(db, quotation, req.error_message)
+
+
+@router.post("/quotation/calculate/route-test")
+async def route_quotation_calculation_test(
+    req: RoutingTestRequest,
+    code: str = "",
+    instance_id: int | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行路由测试")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    try:
+        result = await route_calculation_skill(
+            db=db,
+            quotation=quotation,
+            instance=instance,
+            operator=user.display_name,
+            route_scene=req.route_scene,
+            trigger_source=req.trigger_source,
+            error_message=req.error_message,
+            focus_material_ids=req.focus_material_ids,
+            focus_process_ids=req.focus_process_ids,
+        )
+        db.commit()
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Routing dry-run failed for %s", code or instance_id)
+        raise HTTPException(status_code=500, detail=f"路由测试失败: {exc}")
+
+
+@router.post("/quotation/calculate/route-test-plan")
+async def route_quotation_calculation_test_plan(
+    req: RoutingTestRequest,
+    code: str = "",
+    instance_id: int | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以执行 route_plan 测试")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    try:
+        result = await route_calculation_plan(
+            db=db,
+            quotation=quotation,
+            instance=instance,
+            operator=user.display_name,
+            route_scene=req.route_scene,
+            trigger_source=req.trigger_source,
+            error_message=req.error_message,
+            focus_material_ids=req.focus_material_ids,
+            focus_process_ids=req.focus_process_ids,
+        )
+        db.commit()
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Route-plan dry-run failed for %s", code or instance_id)
+        raise HTTPException(status_code=500, detail=f"route_plan 测试失败: {exc}")
+
+
+@router.get("/quotation/calculate/route-runs")
+def get_quotation_route_runs(
+    code: str = "",
+    instance_id: int | None = None,
+    route_scene: str | None = None,
+    adopt_status: str | None = None,
+    final_action: str | None = None,
+    final_skill: str | None = None,
+    manual_review_required: bool | None = None,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看路由日志")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    rows = list_routing_decision_runs(
+        db=db,
+        quotation=quotation,
+        instance=instance,
+        route_scene=route_scene,
+        adopt_status=adopt_status,
+        final_action=final_action,
+        final_skill=final_skill,
+        manual_review_required=manual_review_required,
+        confidence_min=confidence_min,
+        confidence_max=confidence_max,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    return {"items": [serialize_routing_decision_run(row) for row in rows]}
+
+
+@router.patch("/quotation/calculate/route-runs/{run_id}/review")
+def review_quotation_route_run(
+    run_id: int,
+    req: RoutingReviewRequest,
+    code: str = "",
+    instance_id: int | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以标注路由结果")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    run = get_routing_decision_run(db, run_id, quotation, instance)
+    if not run:
+        raise HTTPException(status_code=404, detail="未找到该路由记录")
+    try:
+        update_routing_human_review(
+            run,
+            is_correct=req.is_correct,
+            expected_skill=req.expected_skill,
+            comment=req.comment,
+        )
+        db.commit()
+        return {"ok": True, "item": serialize_routing_decision_run(run)}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/calculate/route-runs/summary")
+def get_quotation_route_runs_summary(
+    code: str = "",
+    instance_id: int | None = None,
+    route_scene: str | None = None,
+    adopt_status: str | None = None,
+    final_action: str | None = None,
+    final_skill: str | None = None,
+    manual_review_required: bool | None = None,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看路由汇总")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    summary = summarize_routing_decision_runs(
+        db=db,
+        quotation=quotation,
+        instance=instance,
+        route_scene=route_scene,
+        adopt_status=adopt_status,
+        final_action=final_action,
+        final_skill=final_skill,
+        manual_review_required=manual_review_required,
+        confidence_min=confidence_min,
+        confidence_max=confidence_max,
+        date_from=date_from,
+        date_to=date_to,
+        low_confidence_threshold=0.75,
+    )
+    return summary
+
+
+@router.get("/quotation/calculate/route-runs/export")
+def export_quotation_route_runs(
+    code: str = "",
+    instance_id: int | None = None,
+    route_scene: str | None = None,
+    adopt_status: str | None = None,
+    final_action: str | None = None,
+    final_skill: str | None = None,
+    manual_review_required: bool | None = None,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+    user: UserContext = Depends(get_current_user),
+):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以导出路由样本")
+    quotation, instance = _get_context_or_404(db, user, code, instance_id)
+    rows = list_routing_decision_runs(
+        db=db,
+        quotation=quotation,
+        instance=instance,
+        route_scene=route_scene,
+        adopt_status=adopt_status,
+        final_action=final_action,
+        final_skill=final_skill,
+        manual_review_required=manual_review_required,
+        confidence_min=confidence_min,
+        confidence_max=confidence_max,
+        date_from=date_from,
+        date_to=date_to,
+        limit=100,
+    )
+    buffer = io.StringIO()
+    fieldnames = [
+        "routing_run_id",
+        "quotation_code",
+        "bpm_no",
+        "route_scene",
+        "trigger_source",
+        "error_message",
+        "target_skill",
+        "confidence",
+        "manual_review_required",
+        "matched_material_ids",
+        "matched_process_ids",
+        "reason",
+        "human_is_correct",
+        "human_comment",
+        "create_time",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        item = serialize_routing_decision_run(row)
+        decision = item.get("decision_json") or {}
+        human_review = decision.get("human_review") or {}
+        writer.writerow({
+            "routing_run_id": item["id"],
+            "quotation_code": item["quotation_code"],
+            "bpm_no": item["bpm_no"],
+            "route_scene": item["route_scene"],
+            "trigger_source": item["trigger_source"],
+            "error_message": item["error_message"],
+            "target_skill": decision.get("target_skill") or item["final_skill"],
+            "confidence": item["confidence"] or "",
+            "manual_review_required": decision.get("manual_review_required"),
+            "matched_material_ids": json.dumps(decision.get("matched_material_ids") or [], ensure_ascii=False),
+            "matched_process_ids": json.dumps(decision.get("matched_process_ids") or [], ensure_ascii=False),
+            "reason": decision.get("reason") or "",
+            "human_is_correct": human_review.get("is_correct"),
+            "human_comment": human_review.get("comment") or "",
+            "create_time": item["create_time"] or "",
+        })
+    filename = quote(f"{quotation.quotation_code or 'route-runs'}-route-runs.csv")
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 @router.get("/quotation/calculate/price-summary/traces")
@@ -776,3 +1103,41 @@ def export_quotation(
     except Exception:
         logger.exception("Quotation export failed for %s", code)
         raise HTTPException(status_code=500, detail="成本分析表导出失败")
+
+
+def _record_failure_routing_dry_run(
+    quotation_id: int,
+    instance_id: int | None,
+    operator: str,
+    error_message: str,
+) -> None:
+    route_db = SessionLocal()
+    try:
+        quotation = route_db.query(QuotationMain).filter(QuotationMain.id == quotation_id).first()
+        if not quotation:
+            logger.warning("Skip routing dry-run because quotation %s not found", quotation_id)
+            return
+        instance = None
+        if instance_id:
+            instance = route_db.query(QuotationBpmInstance).filter(QuotationBpmInstance.id == instance_id).first()
+        result = run_routing_dry_run_sync(
+            db=route_db,
+            quotation=quotation,
+            instance=instance,
+            operator=operator,
+            route_scene="calculation_failure",
+            trigger_source="full_price_calc",
+            error_message=error_message,
+        )
+        route_db.commit()
+        logger.info(
+            "failure routing dry-run completed run_id=%s for quotation %s instance %s",
+            result.get("routing_run_id"),
+            quotation.quotation_code,
+            instance.id if instance else None,
+        )
+    except Exception as route_exc:
+        route_db.rollback()
+        logger.warning("Failure routing dry-run skipped: %s", route_exc)
+    finally:
+        route_db.close()

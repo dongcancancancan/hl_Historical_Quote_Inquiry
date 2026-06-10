@@ -227,3 +227,87 @@ export interface DiagnosisResult {
   summary?: string;
   skills?: SkillItem[];
 }
+
+export interface RoutingDecision {
+  route_type?: string;
+  target_skill?: string;
+  target_subtype?: string;
+  mapping_mode?: string;
+  confidence?: number | string;
+  reason?: string;
+  matched_material_ids?: number[];
+  matched_process_ids?: number[];
+  manual_review_required?: boolean;
+}
+
+export interface RoutePlanGroup {
+  group_id: string;
+  step_order: number;
+  group_type: string;
+  target_skill: string;
+  match_status: string;
+  manual_review_required: boolean;
+  confidence: number | string;
+  material_ids: number[];
+  process_ids: number[];
+  material_names: string[];
+  process_names: string[];
+  reason: string;
+  rule_hits: string[];
+}
+
+export interface RoutePlanUnmatchedDetail {
+  item_type: "material" | "process";
+  item_id: number;
+  item_name: string;
+  status: string;
+  suggested_skill?: string;
+  manual_review_required: boolean;
+  reason: string;
+}
+
+export interface RoutePlanResult {
+  route_type: "route_plan";
+  summary_status: string;
+  manual_review_required: boolean;
+  confidence: number | string;
+  reason: string;
+  quotation_code?: string;
+  instance_id?: number | null;
+  groups: RoutePlanGroup[];
+  unmatched_material_ids: number[];
+  unmatched_process_ids: number[];
+  unmatched_details: RoutePlanUnmatchedDetail[];
+  warnings: string[];
+  meta?: Record<string, unknown>;
+}
+
+export interface RoutingTestPayload {
+  route_scene?: string;
+  trigger_source?: string;
+  error_message?: string;
+  focus_material_ids?: number[];
+  focus_process_ids?: number[];
+}
+
+export interface RoutingTestResponse {
+  routing_run_id: number;
+  policy_id?: number | null;
+  policy_name?: string;
+  decision?: RoutingDecision;
+  final_action?: string;
+  final_skill?: string;
+  adopt_status?: string;
+  error_message?: string;
+}
+
+export interface RoutePlanTestResponse {
+  routing_run_id: number;
+  policy_id?: number | null;
+  policy_name?: string;
+  route_plan?: RoutePlanResult;
+  final_action?: string;
+  final_skill?: string;
+  adopt_status?: string;
+  error_message?: string;
+}

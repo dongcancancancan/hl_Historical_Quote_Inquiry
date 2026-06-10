@@ -165,35 +165,6 @@ class QuotationProcessFee(Base):
     main = relationship("QuotationMain", back_populates="processes")
 
 
-class QuotationCostSummary(Base):
-    """[已弃用] 全局费用汇总表 — 费用字段已合并到 quotation_main，此表不再写入"""
-    __tablename__ = "quotation_cost_summary"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    quotation_id = Column(Integer, ForeignKey("quotation_main.id"), index=True, comment="关联报价单主表ID")
-
-    total_material_cost_rmb_m = Column(Numeric(18, 8), comment="材料成本 (RMB/M)")
-    total_material_cost_kg = Column(Numeric(18, 8), comment="材料成本 (KG)")
-    total_material_amount = Column(Numeric(18, 8), comment="材料成本总金额")
-    total_process_cost = Column(Numeric(18, 8), comment="费用总计")
-    ul_label_fee = Column(Numeric(18, 8), comment="UL标签费 (RMB/M)")
-    transport_fee = Column(Numeric(18, 8), comment="运输费 (RMB/KG)")
-    package_fee = Column(Numeric(18, 8), comment="包装费 (RMB/M)")
-    scrap_rate = Column(Numeric(18, 8), comment="废品损耗率")
-    startup_times = Column(Integer, comment="订单开机次数")
-    delivery_fee = Column(Numeric(18, 8), comment="送货费")
-    customs_fee = Column(Numeric(18, 8), comment="报关费 (RMB/次)")
-    order_meters = Column(Numeric(10, 8), comment="订单米数")
-    net_profit_rate = Column(Numeric(18, 8), comment="净利率")
-    vat_rate = Column(Numeric(18, 8), comment="增值税率")
-    business_fee_rate = Column(Numeric(18, 8), comment="营业费用率")
-    monthly_interest_rate = Column(Numeric(18, 8), comment="月结利息率")
-    corp_tax_rate = Column(Numeric(18, 8), comment="企业所得税税率")
-    cost_rmb_m = Column(Numeric(18, 8), comment="成本 (RMB/M)")
-    price_with_profit = Column(Numeric(18, 8), comment="取利售价 (RMB/M)")
-    price_without_profit = Column(Numeric(18, 8), comment="不取利售价 (RMB/M)")
-    final_price = Column(Numeric(18, 8), comment="最终售价 (RMB/M)")
-
 
 class QuotationFieldOverride(Base):
     """审价手工覆盖值，目前仅用于材料单价参与计算。"""

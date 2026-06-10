@@ -7,9 +7,6 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.models.quotation import QuotationFieldOverride, QuotationMain
 
 
-def override_key(record_id: int) -> tuple[str, int, str]:
-    return "material", int(record_id), "unit_price"
-
 
 def load_unit_price_overrides(db: Session, quotation_id: int) -> dict[int, Decimal]:
     rows = (
@@ -33,9 +30,6 @@ def apply_unit_price_overrides(quotation: QuotationMain, overrides: dict[int, De
         if value is not None:
             set_committed_value(item, "unit_price", value)
 
-
-def get_effective_unit_price(item, overrides: dict[int, Decimal]):
-    return overrides.get(item.id, item.unit_price)
 
 
 def has_unit_price_override(item, overrides: dict[int, Decimal]) -> bool:

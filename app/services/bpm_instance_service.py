@@ -311,16 +311,6 @@ def snapshot_instance_from_quotation(
     instance.update_time = now
 
 
-def delete_bpm_instance(
-    db: Session,
-    instance: QuotationBpmInstance,
-    operator: str,
-) -> None:
-    instance.deleted = True
-    instance.updater = operator
-    instance.update_time = datetime.now()
-    db.commit()
-
 
 def _can_access(
     db: Session,

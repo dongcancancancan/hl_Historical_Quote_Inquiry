@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.user import Tenant, User, Sys_BPMUser
-from app.core.auth import hash_password, hash_password_md5, verify_password, create_token, get_user_role
+from app.core.auth import hash_password, verify_password, create_token, get_user_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

@@ -8,3 +8,17 @@ data/
 .idea/
 node_modules/
 frontend/**/dist/
+
+# 临时文件
+tmp/
+tmp_*.py
+*.xls
+*.xlsx
+
+# 评估/工具脚本（非应用代码）
+scripts/
+
+# LibreOffice 锁文件
+.~lock.*#
+~$*.xlsx
+~$*.xls

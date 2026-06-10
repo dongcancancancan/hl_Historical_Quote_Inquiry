@@ -92,6 +92,9 @@
             <el-button size="small" type="warning" :loading="calculationInFlight" @click="calculateFullPrice">
               一键计算最终售价
             </el-button>
+            <el-button size="small" type="success" plain :loading="routeTestLoading" @click="openRouteTestDialog">
+              Skill 路由测试
+            </el-button>
             <el-button size="small" type="primary" plain @click="runDiagnosis">AI 辅助分析</el-button>
             <el-button size="small" type="warning" plain @click="showAllTraces">查看计算过程</el-button>
             <el-dropdown trigger="click">
@@ -134,6 +137,145 @@
       :groups="traceGroups"
       :skills="skillRows"
     />
+
+    <el-dialog v-model="routeTestVisible" title="Skill 路由测试" width="760px">
+      <div class="route-test-panel">
+        <el-alert
+          title="该功能只做路由判断，不会修改金额，也不会自动调用正式计算。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+
+        <div class="route-test-hint">
+          LLM 将基于当前成本分析表直接判断制程如何匹配、各阶段应使用哪个 skill。
+        </div>
+
+        <div class="route-test-actions">
+          <el-button type="primary" :loading="routeTestLoading" @click="executeRouteTest">开始测试</el-button>
+        </div>
+
+        <template v-if="routeTestResult">
+          <el-divider content-position="left">匹配结果</el-divider>
+          <el-alert
+            :title="routeResultSummaryTitle(routeTestResult)"
+            :type="routeResultSummaryType(routeTestResult)"
+            :description="routeResultSummaryDescription(routeTestResult)"
+            :closable="false"
+            show-icon
+          />
+          <div class="route-result-overview">
+            <div class="route-result-summary">
+              <el-tag :type="routeResultTagType(routeTestResult.final_action)">
+                {{ routeResultActionLabel(routeTestResult.final_action) }}
+              </el-tag>
+              <span>{{ routeResultPlainSummary(routeTestResult) }}</span>
+            </div>
+            <div class="route-result-meta">
+              <span>分组 {{ routePlan?.groups?.length || 0 }}</span>
+              <span>未匹配材料 {{ routePlan?.unmatched_material_ids?.length || 0 }}</span>
+              <span>未匹配制程 {{ routePlan?.unmatched_process_ids?.length || 0 }}</span>
+              <span v-if="routePlan?.manual_review_required">当前结果不自动计算</span>
+            </div>
+          </div>
+
+          <div v-if="routePlan?.warnings?.length" class="route-test-block">
+            <strong>补充提示</strong>
+            <div class="route-warning-list">
+              <el-tag v-for="item in routePlan.warnings" :key="item" type="warning" effect="light">
+                {{ item }}
+              </el-tag>
+            </div>
+          </div>
+
+          <div v-if="routePlan?.groups?.length" class="route-test-block">
+            <strong>分组结果</strong>
+            <div class="route-group-list">
+              <div v-for="group in routePlan.groups" :key="group.group_id" class="route-group-card">
+                <div class="route-group-head">
+                  <div class="route-group-title">
+                    阶段 {{ group.step_order }}：{{ routeGroupTypeLabel(group.group_type) }}
+                  </div>
+                  <div class="route-group-tags">
+                    <el-tag type="success">{{ routeSkillLabel(group.target_skill) }}</el-tag>
+                    <el-tag :type="routeMatchStatusTagType(group.match_status)">
+                      {{ routeMatchStatusLabel(group.match_status) }}
+                    </el-tag>
+                    <el-tag :type="group.manual_review_required ? 'warning' : 'info'">
+                      {{ group.manual_review_required ? "先人工复核" : "按该 skill 处理" }}
+                    </el-tag>
+                  </div>
+                </div>
+                <div class="route-group-grid">
+                  <div class="route-group-row">
+                    <span class="route-group-label">材料</span>
+                    <span>{{ formatNamedRouteItems(group.material_ids, group.material_names) }}</span>
+                  </div>
+                  <div class="route-group-row">
+                    <span class="route-group-label">制程</span>
+                    <span>{{ formatNamedRouteItems(group.process_ids, group.process_names) }}</span>
+                  </div>
+                  <div class="route-group-row">
+                    <span class="route-group-label">处理方式</span>
+                    <span>{{ routeGroupHandlingText(group) }}</span>
+                  </div>
+                  <div v-if="group.reason && group.reason !== routeGroupHandlingText(group)" class="route-group-row">
+                    <span class="route-group-label">说明</span>
+                    <span>{{ group.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="routePlan?.unmatched_details?.length" class="route-test-block">
+            <strong>未匹配项如何处理</strong>
+            <div class="route-unmatched-columns">
+              <div class="route-unmatched-column">
+                <div class="route-unmatched-title">未匹配材料</div>
+                <div
+                  v-for="item in unmatchedMaterials"
+                  :key="`material-${item.item_id}`"
+                  class="route-unmatched-card"
+                >
+                  <div class="route-unmatched-name">{{ item.item_id }} {{ item.item_name || "-" }}</div>
+                  <div class="route-unmatched-meta">
+                    {{ routeUnmatchedHandlingText(item) }}
+                  </div>
+                  <div v-if="item.reason" class="route-unmatched-reason">{{ item.reason }}</div>
+                </div>
+                <div v-if="!unmatchedMaterials.length" class="route-empty-text">无</div>
+              </div>
+              <div class="route-unmatched-column">
+                <div class="route-unmatched-title">未匹配制程</div>
+                <div
+                  v-for="item in unmatchedProcesses"
+                  :key="`process-${item.item_id}`"
+                  class="route-unmatched-card"
+                >
+                  <div class="route-unmatched-name">{{ item.item_id }} {{ item.item_name || "-" }}</div>
+                  <div class="route-unmatched-meta">
+                    {{ routeUnmatchedHandlingText(item) }}
+                  </div>
+                  <div v-if="item.reason" class="route-unmatched-reason">{{ item.reason }}</div>
+                </div>
+                <div v-if="!unmatchedProcesses.length" class="route-empty-text">无</div>
+              </div>
+            </div>
+          </div>
+
+          <details class="route-test-raw">
+            <summary>查看原始 JSON</summary>
+            <pre>{{ routePlanJson }}</pre>
+          </details>
+
+          <div v-if="showRouteExecutionError" class="route-test-block error">
+            <strong>执行失败</strong>
+            <pre>{{ routeTestResult.error_message }}</pre>
+          </div>
+        </template>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -157,10 +299,20 @@ import {
   fetchTraces,
   markQuoted,
   openInternalPage,
+  routeTestPlan,
   saveCalcParams,
   updateQuotation,
 } from "./api";
-import type { CalcParams, DiagnosisResult, QuoteItem, ReviewStatus, SkillItem, StatusTone, TraceGroup } from "./types";
+import type {
+  CalcParams,
+  DiagnosisResult,
+  QuoteItem,
+  RoutePlanTestResponse,
+  ReviewStatus,
+  SkillItem,
+  StatusTone,
+  TraceGroup,
+} from "./types";
 
 assertReviewerSession();
 
@@ -186,6 +338,9 @@ const traceLoading = ref(false);
 const traceTitle = ref("计算过程");
 const traceGroups = ref<TraceGroup[]>([]);
 const skillRows = ref<SkillItem[]>([]);
+const routeTestVisible = ref(false);
+const routeTestLoading = ref(false);
+const routeTestResult = ref<RoutePlanTestResponse | null>(null);
 let historyRequestSeq = 0;
 let searchTimer: number | null = null;
 let calcParamAutoSaveTimer: number | null = null;
@@ -209,6 +364,17 @@ const calcInputErrors = reactive<Partial<Record<keyof CalcParams, string>>>({
 });
 
 const currentDiagnosis = computed(() => (selectedCode.value ? diagnosisCache[selectedCode.value] || null : null));
+const routePlan = computed(() => routeTestResult.value?.route_plan || null);
+const unmatchedMaterials = computed(() =>
+  (routePlan.value?.unmatched_details || []).filter((item) => item.item_type === "material"),
+);
+const unmatchedProcesses = computed(() =>
+  (routePlan.value?.unmatched_details || []).filter((item) => item.item_type === "process"),
+);
+const routePlanJson = computed(() => JSON.stringify(routePlan.value || {}, null, 2));
+const showRouteExecutionError = computed(
+  () => !!routeTestResult.value?.error_message && routeTestResult.value?.final_action === "reject",
+);
 
 watch(pendingSearch, () => {
   if (searchTimer) window.clearTimeout(searchTimer);
@@ -540,6 +706,186 @@ async function runDiagnosis(errorMessage = ""): Promise<void> {
   } finally {
     diagnosisLoading.value = false;
   }
+}
+
+function openRouteTestDialog(): void {
+  if (!selectedCode.value) {
+    ElMessage.warning("请先从左侧选择一条成本分析表");
+    return;
+  }
+  routeTestVisible.value = true;
+  routeTestResult.value = null;
+}
+
+async function executeRouteTest(): Promise<void> {
+  if (!selectedCode.value) return;
+  routeTestLoading.value = true;
+  try {
+    routeTestResult.value = await routeTestPlan(selectedCode.value, selectedInstanceId.value, {
+      route_scene: "fallback_skill_route",
+      trigger_source: "frontend_route_plan_test",
+    });
+    setCalcStatus("Skill 路由测试已完成，可查看 route_plan 分组结果。", "success");
+    ElMessage.success("Skill 路由测试完成");
+  } catch (err: any) {
+    ElMessage.error("Skill 路由测试失败：" + err.message);
+  } finally {
+    routeTestLoading.value = false;
+  }
+}
+
+function formatRouteIdList(values?: number[]): string {
+  return values && values.length ? values.join(", ") : "无";
+}
+
+function formatRouteConfidence(value?: number | string): string {
+  if (value === null || value === undefined || value === "") return "-";
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(2) : String(value);
+}
+
+function routeSkillLabel(skill?: string): string {
+  if (!skill) return "-";
+  if (skill === "route_plan") return "route_plan";
+  if (skill === "conductor_material_and_process") return "导体/编织材料及制程费用";
+  if (skill === "glue_external_and_process") return "胶料/外购材料及后续制程费用";
+  if (skill === "price_summary") return "最终售价汇总";
+  return skill;
+}
+
+function routeResultSummaryType(result: RoutePlanTestResponse): "success" | "warning" | "error" {
+  if (result.route_plan?.summary_status === "full_match" && !result.route_plan?.manual_review_required) return "success";
+  if (result.final_action === "reject" || result.route_plan?.summary_status === "reject") return "error";
+  return "warning";
+}
+
+function routeResultSummaryTitle(result: RoutePlanTestResponse): string {
+  const plan = result.route_plan;
+  if (!plan) return "路由测试结果暂不可用";
+  if (plan.summary_status === "full_match" && !plan.manual_review_required) {
+    return "已完成制程匹配";
+  }
+  if (plan.summary_status === "reject") {
+    return "当前无法形成可用匹配结果";
+  }
+  if (plan.summary_status === "manual_review_only") {
+    return "当前只能给出人工复核建议";
+  }
+  return "已识别部分匹配结果";
+}
+
+function routeResultSummaryDescription(result: RoutePlanTestResponse): string {
+  const plan = result.route_plan;
+  if (!plan) return "未返回 route_plan 结果。";
+  if (plan.summary_status === "full_match" && !plan.manual_review_required) {
+    return "已给出每个阶段对应的 skill 和上下匹配关系。";
+  }
+  if (plan.summary_status === "reject") {
+    return "当前信息不足，暂时无法给出可靠的制程匹配。";
+  }
+  if (plan.summary_status === "manual_review_only") {
+    return "当前没有形成可靠分组，未匹配项暂不自动计算。";
+  }
+  if (!(plan.unmatched_material_ids?.length || plan.unmatched_process_ids?.length)) {
+    return "分组已识别，但因为价格或其他非路由问题，当前结果仍建议人工复核。";
+  }
+  return "已识别部分分组；未匹配项暂不自动计算，需你人工确认。";
+}
+
+function routeResultActionLabel(action?: string): string {
+  if (action === "route_skill") return "通过";
+  if (action === "manual_review") return "需人工复核";
+  if (action === "reject") return "不可用";
+  return "-";
+}
+
+function routeResultTagType(action?: string): "success" | "warning" | "danger" | "info" {
+  if (action === "route_skill") return "success";
+  if (action === "manual_review") return "warning";
+  if (action === "reject") return "danger";
+  return "info";
+}
+
+function routePlanStatusLabel(status?: string): string {
+  if (status === "full_match") return "完全匹配";
+  if (status === "partial_match") return "部分匹配";
+  if (status === "manual_review_only") return "仅人工复核";
+  if (status === "reject") return "不可用";
+  return "-";
+}
+
+function routePlanStatusTagType(status?: string): "success" | "warning" | "danger" | "info" {
+  if (status === "full_match") return "success";
+  if (status === "partial_match") return "warning";
+  if (status === "manual_review_only") return "warning";
+  if (status === "reject") return "danger";
+  return "info";
+}
+
+function routeGroupTypeLabel(groupType?: string): string {
+  if (groupType === "conductor_stage") return "导体/编织阶段";
+  if (groupType === "glue_stage") return "胶料/后续制程阶段";
+  if (groupType === "price_summary_stage") return "最终售价汇总阶段";
+  if (groupType === "mixed_stage") return "混合阶段";
+  if (groupType === "unknown_stage") return "待确认阶段";
+  return groupType || "-";
+}
+
+function routeMatchStatusLabel(status?: string): string {
+  if (status === "matched") return "已匹配";
+  if (status === "partially_matched") return "部分匹配";
+  if (status === "ambiguous") return "存在歧义";
+  if (status === "unmatched") return "未匹配";
+  return "-";
+}
+
+function routeMatchStatusTagType(status?: string): "success" | "warning" | "danger" | "info" {
+  if (status === "matched") return "success";
+  if (status === "partially_matched") return "warning";
+  if (status === "ambiguous") return "warning";
+  if (status === "unmatched") return "danger";
+  return "info";
+}
+
+function routeResultPlainSummary(result: RoutePlanTestResponse): string {
+  const plan = result.route_plan;
+  if (!plan) return "未返回可用结果。";
+  const groupCount = plan.groups?.length || 0;
+  const unmatchedCount = (plan.unmatched_material_ids?.length || 0) + (plan.unmatched_process_ids?.length || 0);
+  if (result.final_action === "reject") return "暂时无法判断该成本分析表的可靠路由。";
+  if (unmatchedCount > 0) return `已识别 ${groupCount} 个阶段，剩余 ${unmatchedCount} 项未匹配。`;
+  if (plan.manual_review_required) return `已识别 ${groupCount} 个阶段，但当前结果不自动计算。`;
+  return `已识别 ${groupCount} 个阶段，可直接查看各阶段对应 skill。`;
+}
+
+function routeGroupHandlingText(group: {
+  target_skill: string;
+  match_status: string;
+  manual_review_required: boolean;
+  reason?: string;
+}): string {
+  const skillText = routeSkillLabel(group.target_skill);
+  if (group.match_status === "unmatched") return "本组暂不自动计算，先人工复核。";
+  if (group.match_status === "ambiguous") return `暂不自动计算，待人工确认后再交给 ${skillText}。`;
+  if (group.match_status === "partially_matched") return `先按 ${skillText} 参考处理，剩余部分人工确认。`;
+  if (group.manual_review_required) return `建议人工确认后再交给 ${skillText}。`;
+  return `按 ${skillText} 处理。`;
+}
+
+function routeUnmatchedHandlingText(item: { suggested_skill?: string }): string {
+  if (item.suggested_skill) return `暂不自动计算，人工确认后可交给 ${routeSkillLabel(item.suggested_skill)}。`;
+  return "暂不自动计算，先人工复核。";
+}
+
+function formatNamedRouteItems(ids?: number[], names?: string[]): string {
+  const safeIds = ids || [];
+  if (!safeIds.length) return "无";
+  return safeIds
+    .map((id, index) => {
+      const name = names?.[index];
+      return name ? `${id} ${name}` : String(id);
+    })
+    .join("，");
 }
 
 function renderLocalDiagnosis(message: string): void {

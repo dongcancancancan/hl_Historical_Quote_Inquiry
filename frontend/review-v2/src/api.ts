@@ -7,6 +7,9 @@ import type {
   CopperFeePayload,
   CopperScenarioResponse,
   DiagnosisResult,
+  RoutePlanTestResponse,
+  RoutingTestPayload,
+  RoutingTestResponse,
   PvcMaterialPriceItem,
   PvcMaterialPriceLog,
   PvcMaterialPricePayload,
@@ -360,6 +363,44 @@ export async function diagnose(
   return parseJson<DiagnosisResult>(res);
 }
 
+export async function routeTest(
+  code: string,
+  instanceId: number | null | undefined,
+  data: RoutingTestPayload,
+): Promise<RoutingTestResponse> {
+  const res = await fetch(`${API_ROOT}/quotation/calculate/route-test?${selectedQuery(code, instanceId)}`, {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify({
+      route_scene: data.route_scene || "fallback_skill_route",
+      trigger_source: data.trigger_source || "frontend_route_test",
+      error_message: data.error_message || "",
+      focus_material_ids: data.focus_material_ids || [],
+      focus_process_ids: data.focus_process_ids || [],
+    }),
+  });
+  return parseJson<RoutingTestResponse>(res);
+}
+
+export async function routeTestPlan(
+  code: string,
+  instanceId: number | null | undefined,
+  data: RoutingTestPayload,
+): Promise<RoutePlanTestResponse> {
+  const res = await fetch(`${API_ROOT}/quotation/calculate/route-test-plan?${selectedQuery(code, instanceId)}`, {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify({
+      route_scene: data.route_scene || "fallback_skill_route",
+      trigger_source: data.trigger_source || "frontend_route_test",
+      error_message: data.error_message || "",
+      focus_material_ids: data.focus_material_ids || [],
+      focus_process_ids: data.focus_process_ids || [],
+    }),
+  });
+  return parseJson<RoutePlanTestResponse>(res);
+}
+
 export async function updateQuotation(
   code: string,
   instanceId: number | null | undefined,
@@ -417,4 +458,36 @@ export async function exportExcel(code: string, instanceId?: number | null): Pro
   link.download = `${code}.xlsx`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export async function exportBatchQuote(instanceIds: number[]): Promise<void> {
+  const res = await fetch(`${API_ROOT}/quotation/export-batch-quote`, {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify({ instance_ids: instanceIds }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(formatErrorDetail(data.detail || "导出报价单失败"));
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = parseDownloadFilename(res.headers.get("Content-Disposition")) || "报价单.xls";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function parseDownloadFilename(contentDisposition: string | null): string {
+  if (!contentDisposition) return "";
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+  return plainMatch?.[1] || "";
 }

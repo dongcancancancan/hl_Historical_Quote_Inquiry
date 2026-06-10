@@ -96,46 +96,79 @@
         <el-form class="batch-param-form" label-position="top" @submit.prevent>
           <div class="param-group">
             <h3>基础价格</h3>
-            <el-form-item label="铜价（元/吨）" required>
-              <el-input-number v-model="form.copper_price" :min="0" :step="100" controls-position="right" />
+            <el-form-item label="铜价" required>
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.copper_price" :min="0" :step="100" :controls="false" />
+                <span class="param-unit">元/吨</span>
+              </div>
             </el-form-item>
             <el-form-item label="铜杆加工费">
-              <el-input-number v-model="form.copper_rod_process_fee" :min="0" :step="1" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.copper_rod_process_fee" :min="0" :step="1" :controls="false" />
+                <span class="param-unit">元/吨</span>
+              </div>
             </el-form-item>
-            <el-form-item label="运输费（RMB/KG）">
-              <el-input-number v-model="form.transport_fee" :min="0" :step="0.0001" controls-position="right" />
+            <el-form-item label="运输费">
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.transport_fee" :min="0" :step="0.0001" :controls="false" />
+                <span class="param-unit">RMB/KG</span>
+              </div>
             </el-form-item>
             <el-form-item label="其他费用">
-              <el-input-number v-model="form.other_fee" :min="0" :step="0.01" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.other_fee" :min="0" :step="0.01" :controls="false" />
+                <span class="param-unit">RMB/次</span>
+              </div>
             </el-form-item>
           </div>
 
           <div class="param-group">
             <h3>报价参数</h3>
             <el-form-item label="净利率">
-              <el-input-number v-model="form.net_profit_rate" :min="0" :max="0.9999" :step="0.0001" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.net_profit_rate" :min="0" :max="100" :step="0.01" :controls="false" />
+                <span class="param-unit">%</span>
+              </div>
             </el-form-item>
             <el-form-item label="增值税率">
-              <el-input-number v-model="form.vat_rate" :min="0" :step="0.0001" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.vat_rate" :min="0" :max="100" :step="0.01" :controls="false" />
+                <span class="param-unit">%</span>
+              </div>
             </el-form-item>
             <el-form-item label="订单米数" required>
-              <el-input-number v-model="form.order_meterage" :min="0" :step="1000" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.order_meterage" :min="0" :step="1000" :controls="false" />
+                <span class="param-unit">M</span>
+              </div>
             </el-form-item>
             <el-form-item label="营业费用率">
-              <el-input-number v-model="form.operating_expense_rate" :min="0" :step="0.0001" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.operating_expense_rate" :min="0" :max="100" :step="0.01" :controls="false" />
+                <span class="param-unit">%</span>
+              </div>
             </el-form-item>
             <el-form-item label="月结利息">
-              <el-input-number v-model="form.monthly_interest" :min="0" :step="0.0001" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.monthly_interest" :min="0" :max="100" :step="0.001" :controls="false" />
+                <span class="param-unit">%</span>
+              </div>
             </el-form-item>
             <el-form-item label="企税税率">
-              <el-input-number v-model="form.corporate_tax_rate" :min="0" :step="0.0001" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.corporate_tax_rate" :min="0" :max="100" :step="0.01" :controls="false" />
+                <span class="param-unit">%</span>
+              </div>
             </el-form-item>
           </div>
 
           <div class="param-group">
             <h3>通关/附加</h3>
             <el-form-item label="报关费">
-              <el-input-number v-model="form.customs_fee" :min="0" :step="1" controls-position="right" />
+              <div class="param-input-with-unit">
+                <el-input-number v-model="form.customs_fee" :min="0" :step="1" :controls="false" />
+                <span class="param-unit">RMB/次</span>
+              </div>
             </el-form-item>
           </div>
         </el-form>
@@ -143,6 +176,7 @@
         <div class="batch-action-buttons">
           <el-button class="wide" type="primary" plain :loading="saving" @click="applyParams(false)">仅保存参数</el-button>
           <el-button class="wide no-margin" type="success" :loading="saving" @click="applyParams(true)">保存参数并一键计算</el-button>
+          <el-button class="wide no-margin" type="warning" plain :loading="exporting" @click="exportQuoteSheet">导出报价单</el-button>
           <el-button class="wide no-margin" type="danger" plain :loading="deleting" @click="batchDelete">删除已选待报价</el-button>
         </div>
       </aside>
@@ -157,6 +191,7 @@ import {
   assertReviewerSession,
   batchDeleteQuotations,
   batchSaveCalcParams,
+  exportBatchQuote,
   fetchQuotationsByBpm,
   openInternalPage,
 } from "./api";
@@ -172,6 +207,7 @@ const statusText = ref("");
 const loading = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
+const exporting = ref(false);
 const items = ref<QuoteItem[]>([]);
 const selectedRows = ref<QuoteItem[]>([]);
 const rowStatusMap = reactive<Record<number, RowStatus>>({});
@@ -185,13 +221,13 @@ const form = reactive({
   copper_rod_process_fee: 1055,
   transport_fee: 0,
   other_fee: 0,
-  net_profit_rate: 0.08,
+  net_profit_rate: 8,
   customs_fee: 0,
-  vat_rate: 1.13,
+  vat_rate: 13,
   order_meterage: null as number | null,
-  operating_expense_rate: 0.01,
-  monthly_interest: 0.00002,
-  corporate_tax_rate: 0.15,
+  operating_expense_rate: 1,
+  monthly_interest: 0.002,
+  corporate_tax_rate: 15,
 });
 
 const selectableRows = computed(() => items.value.filter(isSelectable));
@@ -278,13 +314,13 @@ async function applyParams(calculateAfterSave: boolean): Promise<void> {
       copper_rod_process_fee: String(form.copper_rod_process_fee),
       transport_fee: String(form.transport_fee),
       other_fee: String(form.other_fee),
-      net_profit_rate: String(form.net_profit_rate),
+      net_profit_rate: percentToRatio(form.net_profit_rate),
       customs_fee: String(form.customs_fee),
-      vat_rate: String(form.vat_rate),
+      vat_rate: percentToVatMultiplier(form.vat_rate),
       order_meterage: form.order_meterage === null ? null : String(form.order_meterage),
-      operating_expense_rate: String(form.operating_expense_rate),
-      monthly_interest: String(form.monthly_interest),
-      corporate_tax_rate: String(form.corporate_tax_rate),
+      operating_expense_rate: percentToRatio(form.operating_expense_rate),
+      monthly_interest: percentToRatio(form.monthly_interest),
+      corporate_tax_rate: percentToRatio(form.corporate_tax_rate),
       calculate_after_save: calculateAfterSave,
     });
     applyResultStatus(data, calculateAfterSave);
@@ -319,6 +355,28 @@ async function batchDelete(): Promise<void> {
     ElMessage.error("批量删除失败：" + err.message);
   } finally {
     deleting.value = false;
+  }
+}
+
+async function exportQuoteSheet(): Promise<void> {
+  const instanceIds = selectedInstanceIds();
+  if (!instanceIds.length) {
+    ElMessage.warning("请选择需要导出的成本分析表");
+    return;
+  }
+  const missingFinalPrice = selectedRows.value.filter((row) => !row.final_selling_price);
+  if (missingFinalPrice.length) {
+    ElMessage.warning("请先确保已选成本分析表都已成功生成最终售价，再导出报价单");
+    return;
+  }
+  exporting.value = true;
+  try {
+    await exportBatchQuote(instanceIds);
+    ElMessage.success("报价单导出成功");
+  } catch (err: any) {
+    ElMessage.error("报价单导出失败：" + err.message);
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -364,5 +422,15 @@ function showBatchResult(data: BatchResult, title: string): void {
 
 function formatTime(value?: string): string {
   return value ? value.replace("T", " ").substring(0, 19) : "-";
+}
+
+function percentToRatio(value: number | null | undefined): string {
+  if (value === null || value === undefined || value === ("" as any)) return "";
+  return String(Number(value) / 100);
+}
+
+function percentToVatMultiplier(value: number | null | undefined): string {
+  if (value === null || value === undefined || value === ("" as any)) return "";
+  return String(1 + Number(value) / 100);
 }
 </script>
