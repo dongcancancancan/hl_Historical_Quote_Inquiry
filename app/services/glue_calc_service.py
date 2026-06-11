@@ -49,7 +49,7 @@ def calculate_glue_materials(
         and (
             _has_c_code(item)
             or _external_material_code(item)
-            or _is_jacket_row(item)
+            or _is_jacket_row(item, quotation)
             or _is_color_masterbatch_row(item)
             or item.id in unit_price_overrides
         )
@@ -138,14 +138,14 @@ def calculate_glue_materials(
                 continue
         if material_calculated:
             calculated += 1
-        if _is_insulation_row(item):
+        if _is_insulation_row(item) and not _is_jacket_row(item, quotation):
             ok, error = _calculate_insulation_process_fee(db, quotation, item, operator, now, ctx, used_insulation_process_ids)
             if ok:
                 insulation_process_calculated += 1
             elif error:
                 hard_errors.append(error)
 
-    for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row)]:
+    for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row, quotation)]:
         ok, error = _calculate_jacket_process_fee(db, quotation, item, operator, now, ctx)
         if ok:
             jacket_process_calculated += 1
@@ -1529,9 +1529,23 @@ def _is_color_masterbatch_row(item: QuotationMaterial) -> bool:
     return "色母" in text
 
 
-def _is_jacket_row(item: QuotationMaterial) -> bool:
+def _is_jacket_row(item: QuotationMaterial, quotation: QuotationMain | None = None) -> bool:
     name = str(item.process_name or "")
-    return not _is_color_masterbatch_row(item) and ("外被" in name or "护套" in name or "外护" in name)
+    if _is_color_masterbatch_row(item):
+        return False
+    if "外被" in name or "护套" in name or "外护" in name:
+        return True
+    return _is_last_insulation_material(item, quotation)
+
+
+def _is_last_insulation_material(item: QuotationMaterial, quotation: QuotationMain | None = None) -> bool:
+    if quotation is None or not _is_insulation_row(item):
+        return False
+    active_materials = [row for row in quotation.materials if not row.deleted]
+    if not active_materials:
+        return False
+    active_materials.sort(key=lambda row: (row.seq_no if row.seq_no is not None else 10**9, row.id or 0))
+    return active_materials[-1].id == item.id
 
 
 def _is_core_conductor_row(item: QuotationMaterial) -> bool:
@@ -1656,7 +1670,7 @@ def _jacket_material_amount_sum(quotation: QuotationMain, ctx: CalculationContex
         for item in quotation.materials
         if not item.deleted
         and (ctx is None or item.id in ctx.calculated_material_ids)
-        and _is_jacket_row(item)
+        and _is_jacket_row(item, quotation)
     ))
 
 
@@ -1681,7 +1695,7 @@ def _pair_twist_material_amounts(
         # P结尾外被也视为 P结尾芯押
         p_suffix_insulation_rows = [
             item for item in quotation.materials
-            if not item.deleted and _is_jacket_row(item) and _spec_ends_with_p(item)
+            if not item.deleted and _is_jacket_row(item, quotation) and _spec_ends_with_p(item)
         ]
     p_suffix_copper_amount = _round4(sum(
         Decimal(item.material_amount or 0)

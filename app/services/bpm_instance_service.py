@@ -243,7 +243,7 @@ def serialize_instance_calc_params(
                 "copper_price": _decimal_text(instance.copper_price),
                 "copper_rod_process_fee": _decimal_text(instance.copper_rod_process_fee or DEFAULT_COPPER_ROD_PROCESS_FEE),
                 "conductor_vat_rate": _decimal_text(params.vat_rate or DEFAULT_VAT_RATE),
-                "vat_rate": _decimal_text(quotation.vat_rate if quotation.vat_rate is not None else instance.vat_rate),
+                "vat_rate": _decimal_text(instance.vat_rate if instance.vat_rate is not None else quotation.vat_rate),
                 "ul_label_fee": _decimal_text(instance.ul_label_fee if instance.ul_label_fee is not None else quotation.ul_label_fee),
                 "transport_fee": _decimal_text(instance.transport_fee if instance.transport_fee is not None else quotation.transport_fee),
                 "other_fee": _decimal_text(instance.other_fee if instance.other_fee is not None else quotation.other_fee),
@@ -371,6 +371,7 @@ REVIEW_PARAM_FIELDS = [
     "other_fee",
     "net_profit_rate",
     "customs_fee",
+    "vat_rate",
     "order_meterage",
     "operating_expense_rate",
     "monthly_interest",
@@ -379,6 +380,7 @@ REVIEW_PARAM_FIELDS = [
 
 PERCENT_REVIEW_PARAM_FIELDS = {
     "net_profit_rate",
+    "vat_rate",
     "operating_expense_rate",
     "monthly_interest",
     "corporate_tax_rate",

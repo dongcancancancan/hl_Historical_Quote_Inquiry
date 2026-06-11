@@ -187,7 +187,7 @@ def _restore_review_values(quotation: QuotationMain, values: dict) -> None:
 
 def _find_jacket_material(quotation: QuotationMain):
     for item in quotation.materials:
-        if not item.deleted and _is_jacket_row(item):
+        if not item.deleted and _is_jacket_row(item, quotation):
             return item
     return None
 
@@ -216,6 +216,8 @@ def _outer_material_name(jacket_row) -> str:
     if code.startswith("C"):
         return "低毒PVC外被"
     name = str(getattr(jacket_row, "process_name", "") or "").strip()
+    if "芯押" in name:
+        return "外被"
     return name or "外被"
 
 
@@ -236,6 +238,14 @@ def _extract_od_or_id(quotation: QuotationMain, jacket_row) -> str:
 
 
 def _template_path(template: dict) -> Path:
+    candidates = _template_path_candidates(template)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _template_path_candidates(template: dict) -> list[Path]:
     filename = template["filename"]
     explicit_path = os.getenv("QUOTE_TEMPLATE_PATH")
     explicit_dir = os.getenv("QUOTE_TEMPLATE_DIR")
@@ -247,15 +257,17 @@ def _template_path(template: dict) -> Path:
     candidates.extend(
         [
             PROJECT_ROOT / filename,
+            PROJECT_ROOT / "app" / filename,
             Path.cwd() / filename,
+            Path.cwd() / "app" / filename,
+            Path("/app") / filename,
+            Path("/app/app") / filename,
             Path("/data/hl_Historical_Quote_Inquiry") / filename,
+            Path("/data/hl_Historical_Quote_Inquiry/app") / filename,
             Path("/data") / filename,
         ]
     )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0] if candidates else PROJECT_ROOT / filename
+    return list(dict.fromkeys(candidates))
 
 
 def _render_workbook_from_template(
@@ -268,7 +280,8 @@ def _render_workbook_from_template(
 ) -> BytesIO:
     template_path = _template_path(template)
     if not template_path.exists():
-        raise ValueError(f"未找到报价单模板：{template_path}")
+        searched = "；".join(str(item) for item in _template_path_candidates(template))
+        raise ValueError(f"未找到报价单模板：{template_path}；已搜索路径：{searched}")
 
     workbook = load_workbook(template_path)
     if template["sheet_name"] not in workbook.sheetnames:

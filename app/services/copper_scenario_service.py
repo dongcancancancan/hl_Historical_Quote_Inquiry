@@ -177,7 +177,7 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
             _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
         )
 
-    for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row)]:
+    for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row, quotation)]:
         process = _match_jacket_process_fee_row(quotation, item)
         if not process:
             continue
@@ -195,7 +195,7 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
     jacket_amount = _round4(sum(
         material_amounts.get(item.id, _decimal(item.material_amount))
         for item in quotation.materials
-        if not item.deleted and _is_jacket_row(item)
+        if not item.deleted and _is_jacket_row(item, quotation)
     ))
     package_base_amount = _round4(all_material_amount - jacket_amount)
     for process in [row for row in quotation.processes if not row.deleted and _is_package_tape_process(row)]:

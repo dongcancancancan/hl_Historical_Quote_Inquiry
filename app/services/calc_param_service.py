@@ -89,7 +89,7 @@ def normalize_vat_multiplier(value, label: str = "增值税率") -> Decimal:
 
 
 def normalize_vat_rate(value, label: str = "增值税率") -> Decimal:
-    result = _required_positive_decimal(value, label)
+    result = _required_decimal(value, label)
     if result > Decimal("2"):
         return result / Decimal("100")
     if result > Decimal("1"):

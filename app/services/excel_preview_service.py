@@ -514,7 +514,7 @@ def render_quotation_preview(
         if instance and instance.final_selling_price is not None
         else quotation.final_selling_price
     )
-    raw_display_vat_rate = quotation.vat_rate if quotation.vat_rate is not None else (instance.vat_rate if instance else None)
+    raw_display_vat_rate = (instance.vat_rate if instance and instance.vat_rate is not None else quotation.vat_rate)
     try:
         display_vat_rate = normalize_vat_rate(raw_display_vat_rate) if raw_display_vat_rate is not None else None
     except (ValueError, Exception):
@@ -738,7 +738,10 @@ def _format_value(value) -> str:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, (Decimal, float)):
-        return f"{value:f}".rstrip("0").rstrip(".") or "0"
+        text = f"{value:f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
     return str(value)
 
 
@@ -767,13 +770,44 @@ def _render_internal_metrics_panel(quotation, instance: QuotationBpmInstance | N
         material_ratio = metrics["material_ratio"]
     if order_weight is None:
         order_weight = metrics["order_weight"]
+    material_cost = getattr(quotation, "material_cost", None)
+    final_selling_price = (
+        getattr(instance, "final_selling_price", None)
+        if instance and getattr(instance, "final_selling_price", None) is not None
+        else getattr(quotation, "final_selling_price", None)
+    )
+    vat_rate = (
+        getattr(instance, "vat_rate", None)
+        if instance and getattr(instance, "vat_rate", None) is not None
+        else getattr(quotation, "vat_rate", None)
+    )
+    unit_usage_sum = getattr(quotation, "unit_usage_sum", None)
+    order_meterage = (
+        getattr(instance, "order_meterage", None)
+        if instance and getattr(instance, "order_meterage", None) is not None
+        else getattr(quotation, "order_meterage", None)
+    )
+    normalized_vat_rate = normalize_vat_rate(vat_rate) if vat_rate is not None else Decimal("0")
+    tax_formula = "材料占比 = 材料成本 × (1 + 增值税率) / 最终售价"
+    tax_steps = (
+        f"材料成本 = {_format_value(material_cost) or '-'}\n"
+        f"增值税率 = {_format_value(normalized_vat_rate) or '0'}\n"
+        f"最终售价 = {_format_value(final_selling_price) or '-'}\n"
+        f"计算结果 = {_format_percent_value(material_ratio)}"
+    )
+    weight_formula = "订单重量 = 单位用量合计(KG/M) × 订单米数"
+    weight_steps = (
+        f"单位用量合计 = {_format_value(unit_usage_sum) or '-'} KG/M\n"
+        f"订单米数 = {_format_value(order_meterage) or '-'}\n"
+        f"计算结果 = {_format_weight_value(order_weight)}"
+    )
     return f"""
     <section class="internal-metrics" aria-label="内部指标">
-        <div class="internal-metric">
+        <div class="internal-metric" data-formula="{html.escape(tax_formula, quote=True)}" data-steps="{html.escape(tax_steps, quote=True)}">
             <span>材料占比</span>
             <strong>{html.escape(_format_percent_value(material_ratio))}</strong>
         </div>
-        <div class="internal-metric">
+        <div class="internal-metric" data-formula="{html.escape(weight_formula, quote=True)}" data-steps="{html.escape(weight_steps, quote=True)}">
             <span>订单重量</span>
             <strong>{html.escape(_format_weight_value(order_weight))}</strong>
         </div>
@@ -942,7 +976,8 @@ def _wrap_preview_html(quotation_code: str, table_html: str, internal_metrics_ht
         .locked-cell {{ background: #dbeafe !important; }}
         .lock-mark {{ position: absolute; right: 2px; top: 1px; color: #1d4ed8; font-size: 10px; font-family: Arial, sans-serif; }}
         .internal-metrics {{ min-width: 1080px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }}
-        .internal-metric {{ border: 1px solid #cbd5e1; background: #fff; padding: 12px 14px; box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }}
+        .internal-metric {{ border: 1px solid #cbd5e1; background: #fff; padding: 12px 14px; box-shadow: 0 1px 2px rgb(15 23 42 / 4%); cursor: help; }}
+        .internal-metric:hover {{ background: #fefce8; border-color: #f59e0b; }}
         .internal-metric span {{ display: block; color: #64748b; font-size: 12px; }}
         .internal-metric strong {{ display: block; margin-top: 6px; color: #111827; font-family: Consolas, monospace; font-size: 20px; }}
         /* tooltip */
@@ -975,6 +1010,14 @@ def _wrap_preview_html(quotation_code: str, table_html: str, internal_metrics_ht
             move(ev);
         }}
 
+        function showMetric(ev, el) {{
+            currentKey = null;
+            ff.textContent = el.dataset.formula || '';
+            ss.textContent = el.dataset.steps || '';
+            tooltip.classList.add('visible');
+            move(ev);
+        }}
+
         function move(ev) {{
             var x = ev.clientX + 16, y = ev.clientY - 8;
             if (x + 490 > window.innerWidth) x = ev.clientX - 500;
@@ -997,6 +1040,11 @@ def _wrap_preview_html(quotation_code: str, table_html: str, internal_metrics_ht
             hoverTarget.addEventListener('mouseenter', function(ev) {{ show(ev, key); }});
             hoverTarget.addEventListener('mousemove', move);
             hoverTarget.addEventListener('mouseleave', hide);
+        }});
+        document.querySelectorAll('.internal-metric[data-formula]').forEach(function(el) {{
+            el.addEventListener('mouseenter', function(ev) {{ showMetric(ev, el); }});
+            el.addEventListener('mousemove', move);
+            el.addEventListener('mouseleave', hide);
         }});
     }})();
     </script>
