@@ -141,7 +141,7 @@ def render_quotation_excel(quotation: QuotationMain) -> BytesIO:
 
     row += 1
     fee_start_row = row
-    _merge_write(worksheet, row, 1, row + 5, 2, "其他费用(送货费)", fill=FEE_LABEL_FILL, bold=True)
+    _merge_write(worksheet, row, 1, row + 5, 2, "其他费用", fill=FEE_LABEL_FILL, bold=True)
     fee_headers = ["UL标签费(RMB/M)", "运输费(RMB/KG)", "包装费(RMB/M)", "废品损耗(%)", "订单开机次数", "费用总计"]
     for column, header in enumerate(fee_headers, start=3):
         _write(worksheet, row, column, header, fill=FEE_LABEL_FILL, bold=True, wrap_text=True)
