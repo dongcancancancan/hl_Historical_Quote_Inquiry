@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 from copy import copy
 from datetime import datetime
 from decimal import Decimal
@@ -235,7 +236,26 @@ def _extract_od_or_id(quotation: QuotationMain, jacket_row) -> str:
 
 
 def _template_path(template: dict) -> Path:
-    return PROJECT_ROOT / template["filename"]
+    filename = template["filename"]
+    explicit_path = os.getenv("QUOTE_TEMPLATE_PATH")
+    explicit_dir = os.getenv("QUOTE_TEMPLATE_DIR")
+    candidates = []
+    if explicit_path:
+        candidates.append(Path(explicit_path))
+    if explicit_dir:
+        candidates.append(Path(explicit_dir) / filename)
+    candidates.extend(
+        [
+            PROJECT_ROOT / filename,
+            Path.cwd() / filename,
+            Path("/data/hl_Historical_Quote_Inquiry") / filename,
+            Path("/data") / filename,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else PROJECT_ROOT / filename
 
 
 def _render_workbook_from_template(

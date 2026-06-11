@@ -15,6 +15,8 @@ from app.services.unit_price_override_service import apply_unit_price_overrides,
 
 
 PVC_CODE_RE = re.compile(r"\b(C[A-Z0-9*]{3,})\b", re.IGNORECASE)
+PVC_BOM_VIEW_NAME = "v_qs_PVCBOM"
+_PVC_BOM_VIEW_COLUMNS: set[str] | None = None
 GLUE_CALC_TYPES = [
     "glue",
     "external_material",
@@ -314,10 +316,16 @@ def _calculate_c_material(
         "process_code": item.process_code,
         "resolved_bom_no": lookup["bom_no"],
         "source_text": lookup["source_text"],
-        "source": "PVC_BOM_Main.saleprice",
+        "source": lookup.get("source", "dbo.PVC_BOM_Main.saleprice"),
+        "source_view": lookup.get("source_view", "dbo.PVC_BOM_Main"),
         "match_mode": lookup.get("match_mode", "exact"),
         "lookup_pattern": lookup.get("lookup_pattern"),
         "saleprice": str(lookup["saleprice"]),
+        "material_name": lookup.get("material_name", ""),
+        "bom_cost": str(lookup.get("cost", "")),
+        "process_fee": str(lookup.get("process_fee", "")),
+        "package_fee": str(lookup.get("package_fee", "")),
+        "detail_refs": lookup.get("detail_refs", []),
         "unit_usage": str(item.unit_usage or 0),
     }
     match_text = ""
@@ -325,7 +333,9 @@ def _calculate_c_material(
         match_text = f"按通配料号 {lookup.get('lookup_pattern')} 模糊匹配并取最高售价。\n"
     process_text = (
         f"{match_text}"
-        f"从 {lookup['source_text']} 解析并匹配到 PVC 母料 {lookup['bom_no']}，该母料售价 = {lookup['saleprice']}。\n"
+        f"从 {lookup['source_text']} 解析并匹配到 PVC 母料 {lookup['bom_no']}，"
+        f"价格来源 {lookup.get('source_view', 'dbo.PVC_BOM_Main')}，售价 = {lookup['saleprice']}。\n"
+        f"{_pvc_bom_detail_text(lookup)}"
         f"胶料单价 = PVC 母料售价 = {unit_price}\n"
         f"材料金额 = BOM用量 {item.unit_usage or 0} × 单价 {unit_price} = {material_amount}"
     )
@@ -975,36 +985,419 @@ def _has_c_code(item: QuotationMaterial) -> bool:
 def _resolve_pvc_bom(db: Session, item: QuotationMaterial) -> dict | None:
     for source_text, code in _candidate_codes(item):
         for normalized in _normalize_code_candidates(code):
-            row = db.execute(text("""
-                SELECT TOP 1 BOM_NO, saleprice
-                FROM dbo.PVC_BOM_Main
-                WHERE BOM_NO = :bom_no AND saleprice IS NOT NULL
-            """), {"bom_no": normalized}).mappings().first()
+            row = _resolve_pvc_bom_from_view(db, normalized, "exact")
             if row:
+                row["source_text"] = source_text
+                row["match_mode"] = "exact"
+                row["lookup_pattern"] = normalized
+                return row
+            row = _resolve_pvc_bom_from_local_table(db, normalized, "exact")
+            if row:
+                row["source_text"] = source_text
+                row["match_mode"] = "exact"
+                row["lookup_pattern"] = normalized
                 return {
-                    "bom_no": row["BOM_NO"],
-                    "saleprice": Decimal(row["saleprice"]),
+                    **row,
                     "source_text": source_text,
                     "match_mode": "exact",
                     "lookup_pattern": normalized,
                 }
         wildcard_pattern = _wildcard_like_pattern(code)
         if wildcard_pattern:
-            row = db.execute(text("""
-                SELECT TOP 1 BOM_NO, saleprice
-                FROM dbo.PVC_BOM_Main
-                WHERE UPPER(BOM_NO) LIKE :pattern ESCAPE '\\'
-                  AND saleprice IS NOT NULL
-                ORDER BY saleprice DESC, BOM_NO
-            """), {"pattern": wildcard_pattern}).mappings().first()
+            row = _resolve_pvc_bom_from_view(db, wildcard_pattern, "wildcard_highest")
+            if row:
+                row["source_text"] = source_text
+                row["match_mode"] = "wildcard_highest"
+                row["lookup_pattern"] = wildcard_pattern
+                return row
+            row = _resolve_pvc_bom_from_local_table(db, wildcard_pattern, "wildcard_highest")
             if row:
                 return {
-                    "bom_no": row["BOM_NO"],
-                    "saleprice": Decimal(row["saleprice"]),
+                    **row,
                     "source_text": source_text,
                     "match_mode": "wildcard_highest",
                     "lookup_pattern": wildcard_pattern,
                 }
+    return None
+
+
+def _pvc_bom_detail_text(lookup: dict) -> str:
+    refs = lookup.get("detail_refs") or []
+    if not refs:
+        return ""
+    detail_text = "；".join(str(item) for item in refs[:8])
+    if len(refs) > 8:
+        detail_text += f"；另 {len(refs) - 8} 项"
+    return (
+        f"ERP BOM 成本 = {lookup.get('cost')}，加工费 = {lookup.get('process_fee')}，"
+        f"包装费 = {lookup.get('package_fee')}。\n"
+        f"ERP BOM 明细：{detail_text}\n"
+    )
+
+
+def _resolve_pvc_bom_from_view(db: Session, lookup_value: str, match_mode: str) -> dict | None:
+    mapping = _pvc_bom_view_mapping(db)
+    if not mapping:
+        return None
+    code_col = mapping["code"]
+    detail_col = mapping["detail_code"]
+    qty_col = mapping["qty"]
+    unit_col = mapping["unit"]
+    name_col = mapping.get("name")
+    name_select = f", [{name_col}] AS material_name" if name_col else ", CAST(NULL AS NVARCHAR(200)) AS material_name"
+    condition_sql = (
+        "UPPER(LTRIM(RTRIM([{code_col}]))) = :lookup_value"
+        if match_mode == "exact"
+        else "UPPER(LTRIM(RTRIM([{code_col}]))) LIKE :lookup_value ESCAPE '\\'"
+    ).format(code_col=code_col)
+    rows = db.execute(text(f"""
+        SELECT TOP 1000
+            [{code_col}] AS bom_no,
+            [{detail_col}] AS detail_code,
+            [{unit_col}] AS unit,
+            TRY_CONVERT(decimal(18, 8), [{qty_col}]) AS quantity
+            {name_select}
+        FROM dbo.[{PVC_BOM_VIEW_NAME}]
+        WHERE {condition_sql}
+          AND [{detail_col}] IS NOT NULL
+          AND TRY_CONVERT(decimal(18, 8), [{qty_col}]) IS NOT NULL
+        ORDER BY [{code_col}]
+    """), {"lookup_value": str(lookup_value or "").strip().upper()}).mappings().all()
+    if not rows:
+        return None
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        bom_no = str(row["bom_no"] or "").strip()
+        if not bom_no:
+            continue
+        grouped.setdefault(bom_no, []).append(row)
+    results = []
+    for bom_no, detail_rows in grouped.items():
+        calculated = _calculate_pvc_bom_saleprice_from_view(db, bom_no, detail_rows)
+        if calculated:
+            results.append(calculated)
+    if not results:
+        return None
+    if match_mode == "wildcard_highest":
+        results.sort(key=lambda item: (item["saleprice"], item["bom_no"]), reverse=True)
+    else:
+        results.sort(key=lambda item: item["bom_no"])
+    return results[0]
+
+
+def _resolve_pvc_bom_from_local_table(db: Session, lookup_value: str, match_mode: str) -> dict | None:
+    if match_mode == "exact":
+        row = db.execute(text("""
+            SELECT TOP 1 BOM_NO, saleprice
+            FROM dbo.PVC_BOM_Main
+            WHERE BOM_NO = :lookup_value AND saleprice IS NOT NULL
+        """), {"lookup_value": lookup_value}).mappings().first()
+    else:
+        row = db.execute(text("""
+            SELECT TOP 1 BOM_NO, saleprice
+            FROM dbo.PVC_BOM_Main
+            WHERE UPPER(BOM_NO) LIKE :lookup_value ESCAPE '\\'
+              AND saleprice IS NOT NULL
+            ORDER BY saleprice DESC, BOM_NO
+        """), {"lookup_value": lookup_value}).mappings().first()
+    if not row:
+        return None
+    return {
+        "bom_no": row["BOM_NO"],
+        "saleprice": Decimal(row["saleprice"]),
+        "source": "dbo.PVC_BOM_Main.saleprice",
+        "source_view": "dbo.PVC_BOM_Main",
+        "material_name": "",
+    }
+
+
+def _calculate_pvc_bom_saleprice_from_view(db: Session, bom_no: str, detail_rows: list[dict]) -> dict | None:
+    total_weight = Decimal("0")
+    total_amount = Decimal("0")
+    detail_refs = []
+    missing_prices = []
+    material_name = ""
+    bom_units_by_code: dict[str, str] = {}
+    for row in detail_rows:
+        detail_code = str(row["detail_code"] or "").strip().upper()
+        if detail_code:
+            bom_units_by_code.setdefault(detail_code, _normalize_unit(row["unit"]))
+    component_prices = _resolve_pvc_component_prices(db, bom_units_by_code)
+    for row in detail_rows:
+        detail_code = str(row["detail_code"] or "").strip()
+        if not detail_code:
+            continue
+        if not material_name:
+            material_name = str(row["material_name"] or "").strip()
+        quantity = Decimal(row["quantity"] or 0)
+        bom_unit = _normalize_unit(row["unit"])
+        price = component_prices.get(detail_code.upper())
+        if not price:
+            missing_prices.append(detail_code)
+            continue
+        unit_price = Decimal(price["unit_standard_cost"] or 0)
+        price_unit = _normalize_unit(price["unit"])
+        amount = _amount_by_unit(quantity, bom_unit, unit_price, price_unit)
+        total_weight += _weight_as_kg(quantity, bom_unit)
+        total_amount += amount
+        detail_refs.append(
+            f"{detail_code} {quantity}{bom_unit} × {unit_price}/{price_unit} = {_round4(amount)}"
+        )
+    if missing_prices or total_weight <= 0:
+        return None
+    process_fee, package_fee = _pvc_bom_local_fees(db, bom_no)
+    cost = _round4(total_amount / total_weight)
+    saleprice = _round4(cost + process_fee + package_fee)
+    return {
+        "bom_no": bom_no,
+        "saleprice": saleprice,
+        "source": f"dbo.{PVC_BOM_VIEW_NAME} + HL_QS.dbo.v_qs_bzcb",
+        "source_view": f"dbo.{PVC_BOM_VIEW_NAME}",
+        "material_name": material_name,
+        "detail_refs": detail_refs[:20],
+        "cost": cost,
+        "process_fee": process_fee,
+        "package_fee": package_fee,
+    }
+
+
+def _pvc_bom_local_fees(db: Session, bom_no: str) -> tuple[Decimal, Decimal]:
+    row = db.execute(text("""
+        SELECT TOP 1 process, package
+        FROM dbo.PVC_BOM_Main
+        WHERE BOM_NO = :bom_no
+    """), {"bom_no": bom_no}).mappings().first()
+    process_fee = Decimal(row["process"] or 0) if row and row["process"] is not None else Decimal("0.50")
+    package_fee = Decimal(row["package"] or 0) if row and row["package"] is not None else Decimal("0.04")
+    return _round4(process_fee), _round4(package_fee)
+
+
+def _resolve_pvc_component_price(db: Session, material_code: str, bom_unit: str = "") -> dict | None:
+    price = _resolve_external_material_price(db, material_code)
+    if price:
+        return {**price, "source": "HL_QS.dbo.v_qs_bzcb"}
+    row = db.execute(text("""
+        SELECT TOP 1 PRD_NO, NAME, UT, UP, HSYF, CREATEDATE
+        FROM dbo.PVC_MaterialPrice
+        WHERE UPPER(PRD_NO) = :material_code
+          AND UP IS NOT NULL
+        ORDER BY
+            CASE WHEN UPPER(LTRIM(RTRIM(ISNULL(UT, '')))) = :bom_unit THEN 0 ELSE 1 END,
+            CASE WHEN HSYF IS NULL THEN 1 ELSE 0 END,
+            HSYF DESC,
+            CREATEDATE DESC
+    """), {
+        "material_code": str(material_code or "").strip().upper(),
+        "bom_unit": _normalize_unit(bom_unit),
+    }).mappings().first()
+    if not row:
+        return None
+    return {
+        "material_code": row["PRD_NO"],
+        "material_description": row["NAME"] or "",
+        "unit": row["UT"] or "",
+        "adjust_date": row["HSYF"] or row["CREATEDATE"],
+        "unit_standard_cost": Decimal(row["UP"]),
+        "match_mode": "exact",
+        "lookup_pattern": str(material_code or "").strip().upper(),
+        "source": "dbo.PVC_MaterialPrice",
+    }
+
+
+def _resolve_pvc_component_prices(db: Session, bom_units_by_code: dict[str, str]) -> dict[str, dict]:
+    normalized = {
+        str(code or "").strip().upper(): _normalize_unit(unit)
+        for code, unit in (bom_units_by_code or {}).items()
+        if str(code or "").strip()
+    }
+    if not normalized:
+        return {}
+
+    result: dict[str, dict] = {}
+    exact_codes = [code for code in normalized if "*" not in code]
+    if exact_codes:
+        params = {f"code_{idx}": code for idx, code in enumerate(exact_codes)}
+        in_clause = ", ".join(f":code_{idx}" for idx in range(len(exact_codes)))
+        rows = db.execute(text(f"""
+            WITH ranked AS (
+                SELECT
+                    UPPER([物料编号]) AS lookup_code,
+                    [物料编号],
+                    [物料描述],
+                    [单位],
+                    [调整日期],
+                    [单位标准成本],
+                    ROW_NUMBER() OVER (
+                        PARTITION BY UPPER([物料编号])
+                        ORDER BY [调整日期] DESC
+                    ) AS rn
+                FROM [HL_QS].[dbo].[v_qs_bzcb]
+                WHERE UPPER([物料编号]) IN ({in_clause})
+                  AND [单位标准成本] IS NOT NULL
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+        """), params).mappings().all()
+        for row in rows:
+            code = str(row["lookup_code"] or "").strip().upper()
+            result[code] = {
+                "material_code": row["物料编号"],
+                "material_description": row["物料描述"] or "",
+                "unit": row["单位"] or "",
+                "adjust_date": row["调整日期"],
+                "unit_standard_cost": Decimal(row["单位标准成本"]),
+                "match_mode": "exact",
+                "lookup_pattern": code,
+                "source": "HL_QS.dbo.v_qs_bzcb",
+            }
+
+    missing_codes = [code for code in exact_codes if code not in result]
+    if missing_codes:
+        wanted_sql = "\nUNION ALL\n".join(
+            f"SELECT :missing_code_{idx} AS material_code, :missing_unit_{idx} AS bom_unit"
+            for idx in range(len(missing_codes))
+        )
+        params = {}
+        for idx, code in enumerate(missing_codes):
+            params[f"missing_code_{idx}"] = code
+            params[f"missing_unit_{idx}"] = normalized.get(code, "")
+        rows = db.execute(text(f"""
+            WITH wanted AS (
+                {wanted_sql}
+            ),
+            ranked AS (
+                SELECT
+                    w.material_code AS lookup_code,
+                    p.PRD_NO,
+                    p.NAME,
+                    p.UT,
+                    p.UP,
+                    p.HSYF,
+                    p.CREATEDATE,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY w.material_code
+                        ORDER BY
+                            CASE WHEN UPPER(LTRIM(RTRIM(ISNULL(p.UT, '')))) = w.bom_unit THEN 0 ELSE 1 END,
+                            CASE WHEN p.HSYF IS NULL THEN 1 ELSE 0 END,
+                            p.HSYF DESC,
+                            p.CREATEDATE DESC
+                    ) AS rn
+                FROM wanted w
+                JOIN dbo.PVC_MaterialPrice p ON UPPER(p.PRD_NO) = w.material_code
+                WHERE p.UP IS NOT NULL
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+        """), params).mappings().all()
+        for row in rows:
+            code = str(row["lookup_code"] or "").strip().upper()
+            result[code] = {
+                "material_code": row["PRD_NO"],
+                "material_description": row["NAME"] or "",
+                "unit": row["UT"] or "",
+                "adjust_date": row["HSYF"] or row["CREATEDATE"],
+                "unit_standard_cost": Decimal(row["UP"]),
+                "match_mode": "exact",
+                "lookup_pattern": code,
+                "source": "dbo.PVC_MaterialPrice",
+            }
+
+    for code in normalized:
+        if code in result or "*" not in code:
+            continue
+        price = _resolve_pvc_component_price(db, code, normalized.get(code, ""))
+        if price:
+            result[code] = price
+    return result
+
+
+def _amount_by_unit(qty: Decimal, bom_unit: str, unit_price: Decimal, price_unit: str) -> Decimal:
+    if bom_unit == price_unit:
+        return qty * unit_price
+    if bom_unit == "G" and price_unit == "KG":
+        return qty / Decimal("1000") * unit_price
+    if bom_unit == "KG" and price_unit == "G":
+        return qty * Decimal("1000") * unit_price
+    return qty * unit_price
+
+
+def _weight_as_kg(qty: Decimal, unit: str) -> Decimal:
+    return qty / Decimal("1000") if unit == "G" else qty
+
+
+def _normalize_unit(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def _pvc_bom_view_mapping(db: Session) -> dict | None:
+    columns = _pvc_bom_view_columns(db)
+    if not columns:
+        return None
+    code_col = _first_existing_column(columns, [
+        "BOM_NO",
+        "BOMNO",
+        "BOM编号",
+        "母料编号",
+        "母料料号",
+        "物料编号",
+        "PRD_NO",
+    ])
+    detail_col = _first_existing_column(columns, [
+        "PRD_NO",
+        "物料编号",
+        "材料编号",
+        "子件编号",
+        "DETAIL_NO",
+    ])
+    qty_col = _first_existing_column(columns, [
+        "QTY",
+        "数量",
+        "用量",
+    ])
+    unit_col = _first_existing_column(columns, [
+        "UT",
+        "单位",
+        "UNIT",
+    ])
+    if not code_col or not detail_col or not qty_col or not unit_col:
+        return None
+    return {
+        "code": code_col,
+        "detail_code": detail_col,
+        "qty": qty_col,
+        "unit": unit_col,
+        "name": _first_existing_column(columns, ["MJNAME", "名称", "品名", "母料名称", "物料描述", "ZJNAME"]),
+    }
+
+
+def _pvc_bom_view_columns(db: Session) -> set[str]:
+    global _PVC_BOM_VIEW_COLUMNS
+    if _PVC_BOM_VIEW_COLUMNS is not None:
+        return _PVC_BOM_VIEW_COLUMNS
+    try:
+        rows = db.execute(text("""
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = :view_name
+        """), {"view_name": PVC_BOM_VIEW_NAME}).mappings().all()
+    except Exception:
+        _PVC_BOM_VIEW_COLUMNS = set()
+        return _PVC_BOM_VIEW_COLUMNS
+    _PVC_BOM_VIEW_COLUMNS = {str(row["COLUMN_NAME"]) for row in rows}
+    return _PVC_BOM_VIEW_COLUMNS
+
+
+def _first_existing_column(columns: set[str], candidates: list[str]) -> str | None:
+    lower_map = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+        found = lower_map.get(candidate.lower())
+        if found:
+            return found
     return None
 
 

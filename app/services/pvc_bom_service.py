@@ -4,8 +4,19 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.glue_calc_service import (
+    PVC_BOM_VIEW_NAME,
+    _calculate_pvc_bom_saleprice_from_view,
+    _pvc_bom_local_fees,
+    _pvc_bom_view_mapping,
+    _resolve_pvc_component_prices,
+)
+
 
 def list_pvc_boms(db: Session, keyword: str = "") -> list[dict]:
+    view_rows = _list_pvc_boms_from_view(db, keyword)
+    if view_rows is not None:
+        return view_rows
     params = {"keyword": f"%{(keyword or '').strip()}%"}
     filter_sql = ""
     if keyword and keyword.strip():
@@ -43,7 +54,9 @@ def list_pvc_boms(db: Session, keyword: str = "") -> list[dict]:
 
 
 def get_pvc_bom_detail(db: Session, bom_no: str) -> dict | None:
-    main = db.execute(text("""
+    main = _get_pvc_bom_main_from_view(db, bom_no)
+    if not main:
+        main = db.execute(text("""
         SELECT
             m.id,
             m.BOM_NO,
@@ -60,15 +73,17 @@ def get_pvc_bom_detail(db: Session, bom_no: str) -> dict | None:
         LEFT JOIN dbo.PVC_BOM_Detail d ON d.BOM_NO = m.BOM_NO
         WHERE m.BOM_NO = :bom_no AND m.BOM_NO LIKE 'C%'
         GROUP BY m.id, m.BOM_NO, m.MJNAME, m.totalweight, m.totoalAMT, m.COST, m.process, m.package, m.saleprice, m.USR, m.MODIFYDATE
-    """), {"bom_no": bom_no}).mappings().first()
+        """), {"bom_no": bom_no}).mappings().first()
     if not main:
         return None
-    details = db.execute(text("""
-        SELECT id, BOM_NO, MJNAME, PRD_NO, ZJNAME, UT, QTY, UP, AMT
-        FROM dbo.PVC_BOM_Detail
-        WHERE BOM_NO = :bom_no
-        ORDER BY id
-    """), {"bom_no": bom_no}).mappings().all()
+    details = _get_pvc_bom_details_from_view(db, bom_no)
+    if details is None:
+        details = db.execute(text("""
+            SELECT id, BOM_NO, MJNAME, PRD_NO, ZJNAME, UT, QTY, UP, AMT
+            FROM dbo.PVC_BOM_Detail
+            WHERE BOM_NO = :bom_no
+            ORDER BY id
+        """), {"bom_no": bom_no}).mappings().all()
     return {
         "main": _serialize_main(main),
         "details": [_serialize_detail(row) for row in details],
@@ -78,41 +93,63 @@ def get_pvc_bom_detail(db: Session, bom_no: str) -> dict | None:
 def update_pvc_bom_fees(db: Session, bom_no: str, process_fee, package_fee, operator: str) -> dict:
     process_value = _to_decimal(process_fee, "加工费")
     package_value = _to_decimal(package_fee, "包装费")
+    normalized_bom_no = str(bom_no or "").strip().upper()
+    view_main = _get_pvc_bom_main_from_view(db, normalized_bom_no)
     main = db.execute(text("""
         SELECT BOM_NO, COST
         FROM dbo.PVC_BOM_Main
         WHERE BOM_NO = :bom_no AND BOM_NO LIKE 'C%'
-    """), {"bom_no": bom_no}).mappings().first()
-    if not main:
+    """), {"bom_no": normalized_bom_no}).mappings().first()
+    if not main and not view_main:
         raise ValueError("未找到 PVC 母料 BOM")
-    cost = main["COST"]
+    cost = view_main["COST"] if view_main else main["COST"]
+    if cost is None and view_main:
+        raise ValueError("ERP PVC BOM 明细价格不完整，暂不能保存售价；请先维护缺失的明细材料价格")
     if cost is None:
-        cost = _calculate_cost(db, bom_no)
+        cost = _calculate_cost(db, normalized_bom_no)
     saleprice = Decimal(cost or 0) + process_value + package_value
-    db.execute(text("""
-        UPDATE dbo.PVC_BOM_Main
-        SET process = :process,
-            package = :package,
-            saleprice = :saleprice,
-            USR = :operator,
-            MODIFYDATE = :modifydate
-        WHERE BOM_NO = :bom_no
-    """), {
+    params = {
+        "bom_no": normalized_bom_no,
+        "name": view_main["MJNAME"] if view_main else None,
+        "cost": cost,
         "process": process_value,
         "package": package_value,
         "saleprice": saleprice,
         "operator": operator,
         "modifydate": datetime.now(),
-        "bom_no": bom_no,
-    })
+    }
+    if main:
+        db.execute(text("""
+            UPDATE dbo.PVC_BOM_Main
+            SET COST = :cost,
+                process = :process,
+                package = :package,
+                saleprice = :saleprice,
+                USR = :operator,
+                MODIFYDATE = :modifydate
+            WHERE BOM_NO = :bom_no
+        """), params)
+    else:
+        db.execute(text("""
+            INSERT INTO dbo.PVC_BOM_Main (BOM_NO, MJNAME, COST, process, package, saleprice, USR, MODIFYDATE)
+            VALUES (:bom_no, :name, :cost, :process, :package, :saleprice, :operator, :modifydate)
+        """), params)
     db.commit()
-    result = get_pvc_bom_detail(db, bom_no)
+    result = get_pvc_bom_detail(db, normalized_bom_no)
     if not result:
         raise ValueError("PVC 母料 BOM 更新后读取失败")
     return result["main"]
 
 
 def calculate_pvc_bom(db: Session, bom_no: str, operator: str) -> dict:
+    view_main = _get_pvc_bom_main_from_view(db, bom_no)
+    if view_main:
+        if view_main.get("saleprice") is None:
+            raise ValueError("ERP PVC BOM 明细价格不完整，暂不能计算售价；请先维护缺失的明细材料价格")
+        result = get_pvc_bom_detail(db, bom_no)
+        if result:
+            return result
+
     main = db.execute(text("""
         SELECT BOM_NO, process, package
         FROM dbo.PVC_BOM_Main
@@ -220,6 +257,152 @@ def _calculate_cost(db: Session, bom_no: str) -> Decimal:
     totalweight = Decimal(row["totalweight"] or 0)
     totalamt = Decimal(row["totalamt"] or 0)
     return Decimal("0") if totalweight == 0 else totalamt / totalweight
+
+
+def _list_pvc_boms_from_view(db: Session, keyword: str = "") -> list[dict] | None:
+    mapping = _pvc_bom_view_mapping(db)
+    if not mapping:
+        return None
+    code_col = mapping["code"]
+    name_col = mapping.get("name")
+    name_select = f"MIN([{name_col}]) AS MJNAME" if name_col else "CAST(NULL AS NVARCHAR(200)) AS MJNAME"
+    params = {"keyword": f"%{(keyword or '').strip().upper()}%"}
+    filter_sql = ""
+    if keyword and keyword.strip():
+        filter_sql = f"""
+            AND (
+                UPPER([{code_col}]) LIKE :keyword
+                {f"OR UPPER([{name_col}]) LIKE :keyword" if name_col else ""}
+            )
+        """
+    rows = db.execute(text(f"""
+        SELECT TOP 500
+            ROW_NUMBER() OVER (ORDER BY [{code_col}]) AS id,
+            [{code_col}] AS BOM_NO,
+            {name_select},
+            CAST(NULL AS decimal(18, 4)) AS totalweight,
+            CAST(NULL AS decimal(18, 4)) AS totoalAMT,
+            CAST(NULL AS decimal(18, 4)) AS COST,
+            CAST(NULL AS decimal(18, 4)) AS process,
+            CAST(NULL AS decimal(18, 4)) AS package,
+            CAST(NULL AS decimal(18, 6)) AS saleprice,
+            CAST('ERP视图' AS NVARCHAR(64)) AS USR,
+            CAST(NULL AS datetime) AS MODIFYDATE
+        FROM dbo.[{PVC_BOM_VIEW_NAME}]
+        WHERE UPPER([{code_col}]) LIKE 'C%'
+          {filter_sql}
+        GROUP BY [{code_col}]
+        ORDER BY [{code_col}]
+    """), params).mappings().all()
+    return [_serialize_main(row) for row in rows]
+
+
+def _get_pvc_bom_main_from_view(db: Session, bom_no: str):
+    mapping = _pvc_bom_view_mapping(db)
+    if not mapping:
+        return None
+    code_col = mapping["code"]
+    detail_col = mapping["detail_code"]
+    qty_col = mapping["qty"]
+    unit_col = mapping["unit"]
+    name_col = mapping.get("name")
+    name_select = f", [{name_col}] AS material_name" if name_col else ", CAST(NULL AS NVARCHAR(200)) AS material_name"
+    detail_rows = db.execute(text(f"""
+        SELECT
+            [{code_col}] AS BOM_NO,
+            [{detail_col}] AS detail_code,
+            [{unit_col}] AS unit,
+            TRY_CONVERT(decimal(18, 8), [{qty_col}]) AS quantity
+            {name_select}
+        FROM dbo.[{PVC_BOM_VIEW_NAME}]
+        WHERE UPPER(LTRIM(RTRIM([{code_col}]))) = :bom_no
+          AND [{detail_col}] IS NOT NULL
+          AND TRY_CONVERT(decimal(18, 8), [{qty_col}]) IS NOT NULL
+    """), {"bom_no": str(bom_no or "").strip().upper()}).mappings().all()
+    if not detail_rows:
+        return None
+    calculated = _calculate_pvc_bom_saleprice_from_view(db, str(bom_no or "").strip().upper(), list(detail_rows))
+    if not calculated:
+        process_fee, package_fee = _pvc_bom_local_fees(db, str(bom_no or "").strip().upper())
+        return {
+            "id": 0,
+            "BOM_NO": str(bom_no or "").strip().upper(),
+            "MJNAME": str(detail_rows[0]["material_name"] or "").strip(),
+            "totalweight": None,
+            "totoalAMT": None,
+            "COST": None,
+            "process": process_fee,
+            "package": package_fee,
+            "saleprice": None,
+            "USR": "ERP视图",
+            "MODIFYDATE": None,
+        }
+    return {
+        "id": 0,
+        "BOM_NO": calculated["bom_no"],
+        "MJNAME": calculated.get("material_name", ""),
+        "totalweight": None,
+        "totoalAMT": None,
+        "COST": calculated.get("cost"),
+        "process": calculated.get("process_fee"),
+        "package": calculated.get("package_fee"),
+        "saleprice": calculated.get("saleprice"),
+        "USR": "ERP视图",
+        "MODIFYDATE": None,
+    }
+
+
+def _get_pvc_bom_details_from_view(db: Session, bom_no: str) -> list[dict] | None:
+    mapping = _pvc_bom_view_mapping(db)
+    if not mapping:
+        return None
+    code_col = mapping["code"]
+    detail_col = mapping["detail_code"]
+    qty_col = mapping["qty"]
+    unit_col = mapping["unit"]
+    name_col = mapping.get("name")
+    name_select = f", [{name_col}] AS MJNAME" if name_col else ", CAST(NULL AS NVARCHAR(200)) AS MJNAME"
+    rows = db.execute(text(f"""
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY [{detail_col}], [{qty_col}]) AS id,
+            [{code_col}] AS BOM_NO,
+            [{detail_col}] AS PRD_NO,
+            NAME AS ZJNAME,
+            [{unit_col}] AS UT,
+            TRY_CONVERT(decimal(18, 8), [{qty_col}]) AS QTY
+            {name_select}
+        FROM dbo.[{PVC_BOM_VIEW_NAME}]
+        WHERE UPPER(LTRIM(RTRIM([{code_col}]))) = :bom_no
+          AND [{detail_col}] IS NOT NULL
+          AND TRY_CONVERT(decimal(18, 8), [{qty_col}]) IS NOT NULL
+    """), {"bom_no": str(bom_no or "").strip().upper()}).mappings().all()
+    if not rows:
+        return None
+    component_prices = _resolve_pvc_component_prices(db, {
+        str(row["PRD_NO"] or "").strip().upper(): _normalize_unit(row["UT"])
+        for row in rows
+        if str(row["PRD_NO"] or "").strip()
+    })
+    details = []
+    for row in rows:
+        qty = Decimal(row["QTY"] or 0)
+        bom_unit = _normalize_unit(row["UT"])
+        price = component_prices.get(str(row["PRD_NO"] or "").strip().upper())
+        unit_price = Decimal(price["unit_standard_cost"] or 0) if price else None
+        price_unit = _normalize_unit(price["unit"]) if price else bom_unit
+        amount = _round2(_amount_by_unit(qty, bom_unit, unit_price, price_unit)) if unit_price is not None else None
+        details.append({
+            "id": row["id"],
+            "BOM_NO": row["BOM_NO"],
+            "MJNAME": row["MJNAME"],
+            "PRD_NO": row["PRD_NO"],
+            "ZJNAME": row["ZJNAME"],
+            "UT": row["UT"],
+            "QTY": row["QTY"],
+            "UP": unit_price,
+            "AMT": amount,
+        })
+    return details
 
 
 def _get_latest_material_price(db: Session, material_no: str, bom_unit: str):
