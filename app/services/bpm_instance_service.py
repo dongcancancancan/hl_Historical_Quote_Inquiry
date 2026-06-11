@@ -13,9 +13,12 @@ from app.services.calc_param_service import (
     DEFAULT_COPPER_ROD_PROCESS_FEE,
     DEFAULT_VAT_RATE,
     get_or_create_calc_params,
+    normalize_vat_multiplier,
+    normalize_vat_rate,
     serialize_calc_params,
     update_calc_params,
 )
+from app.services.internal_metric_service import apply_internal_metrics_to_instance
 
 REVIEW_PENDING = "pending"
 REVIEW_QUOTED = "quoted"
@@ -154,7 +157,8 @@ def ensure_bpm_instance(
         review_status=REVIEW_PENDING,
         copper_price=params.copper_price if params else None,
         copper_rod_process_fee=params.copper_rod_process_fee if params else DEFAULT_COPPER_ROD_PROCESS_FEE,
-        vat_rate=params.vat_rate if params else DEFAULT_VAT_RATE,
+        vat_rate=normalize_vat_rate(quotation.vat_rate) if quotation.vat_rate is not None else None,
+        ul_label_fee=quotation.ul_label_fee,
         transport_fee=quotation.transport_fee,
         other_fee=quotation.other_fee,
         net_profit_rate=quotation.net_profit_rate,
@@ -238,7 +242,9 @@ def serialize_instance_calc_params(
                 "quote_date": instance.quote_date.isoformat() if instance.quote_date else None,
                 "copper_price": _decimal_text(instance.copper_price),
                 "copper_rod_process_fee": _decimal_text(instance.copper_rod_process_fee or DEFAULT_COPPER_ROD_PROCESS_FEE),
-                "vat_rate": _decimal_text(instance.vat_rate or DEFAULT_VAT_RATE),
+                "conductor_vat_rate": _decimal_text(params.vat_rate or DEFAULT_VAT_RATE),
+                "vat_rate": _decimal_text(quotation.vat_rate if quotation.vat_rate is not None else instance.vat_rate),
+                "ul_label_fee": _decimal_text(instance.ul_label_fee if instance.ul_label_fee is not None else quotation.ul_label_fee),
                 "transport_fee": _decimal_text(instance.transport_fee if instance.transport_fee is not None else quotation.transport_fee),
                 "other_fee": _decimal_text(instance.other_fee if instance.other_fee is not None else quotation.other_fee),
                 "net_profit_rate": _decimal_text(instance.net_profit_rate if instance.net_profit_rate is not None else quotation.net_profit_rate),
@@ -261,11 +267,18 @@ def update_instance_calc_params(
     data: dict,
     operator: str,
 ) -> dict:
-    params = update_calc_params(db, quotation, data, operator)
+    current_params = get_or_create_calc_params(db, quotation, operator)
+    calc_data = {
+        "copper_price": data.get("copper_price"),
+        "copper_rod_process_fee": data.get("copper_rod_process_fee", current_params.copper_rod_process_fee or DEFAULT_COPPER_ROD_PROCESS_FEE),
+        "conductor_vat_rate": data.get("conductor_vat_rate", current_params.vat_rate or DEFAULT_VAT_RATE),
+    }
+    params = update_calc_params(db, quotation, calc_data, operator)
     if instance:
         instance.copper_price = params.copper_price
         instance.copper_rod_process_fee = params.copper_rod_process_fee
-        instance.vat_rate = params.vat_rate
+        if "vat_rate" in data:
+            instance.vat_rate = normalize_vat_rate(data.get("vat_rate"))
         _apply_review_params_to_instance(instance, quotation, data)
         instance.updater = operator
         instance.update_time = datetime.now()
@@ -283,10 +296,11 @@ def sync_instance_calc_params_to_engine(
     if not instance:
         get_or_create_calc_params(db, quotation, operator)
         return
+    params = get_or_create_calc_params(db, quotation, operator)
     data = {
         "copper_price": _decimal_text(instance.copper_price),
         "copper_rod_process_fee": _decimal_text(instance.copper_rod_process_fee or DEFAULT_COPPER_ROD_PROCESS_FEE),
-        "vat_rate": _decimal_text(instance.vat_rate or DEFAULT_VAT_RATE),
+        "conductor_vat_rate": _decimal_text(params.vat_rate or DEFAULT_VAT_RATE),
     }
     update_calc_params(db, quotation, data, operator)
     _apply_instance_review_params_to_quotation(quotation, instance)
@@ -306,6 +320,7 @@ def snapshot_instance_from_quotation(
     instance.profit_selling_price = quotation.profit_selling_price
     instance.non_profit_price = quotation.non_profit_price
     instance.final_selling_price = quotation.final_selling_price
+    apply_internal_metrics_to_instance(instance, quotation)
     _apply_quotation_review_params_to_instance(instance, quotation)
     instance.updater = operator
     instance.update_time = now
@@ -351,6 +366,7 @@ def _decimal_text(value) -> str | None:
 
 
 REVIEW_PARAM_FIELDS = [
+    "ul_label_fee",
     "transport_fee",
     "other_fee",
     "net_profit_rate",
@@ -361,8 +377,15 @@ REVIEW_PARAM_FIELDS = [
     "corporate_tax_rate",
 ]
 
+PERCENT_REVIEW_PARAM_FIELDS = {
+    "net_profit_rate",
+    "operating_expense_rate",
+    "monthly_interest",
+    "corporate_tax_rate",
+}
 
-def _optional_decimal(value):
+
+def _optional_decimal(value, percent: bool = False):
     if value in (None, ""):
         return None
     try:
@@ -371,13 +394,15 @@ def _optional_decimal(value):
         raise ValueError("审价参数格式不正确") from exc
     if result < 0:
         raise ValueError("审价参数不能小于 0")
+    if percent and result > 1:
+        result = result / Decimal("100")
     return result
 
 
 def _apply_review_params_to_instance(instance: QuotationBpmInstance, quotation: QuotationMain, data: dict) -> None:
     for field in REVIEW_PARAM_FIELDS:
         if field in data:
-            setattr(instance, field, _optional_decimal(data.get(field)))
+            setattr(instance, field, _optional_decimal(data.get(field), field in PERCENT_REVIEW_PARAM_FIELDS))
         elif getattr(instance, field, None) is None:
             setattr(instance, field, getattr(quotation, field, None))
 
@@ -387,7 +412,6 @@ def _apply_instance_review_params_to_quotation(quotation: QuotationMain, instanc
         value = getattr(instance, field, None)
         if value is not None:
             setattr(quotation, field, value)
-    quotation.vat_rate = instance.vat_rate or quotation.vat_rate
 
 
 def _apply_quotation_review_params_to_instance(instance: QuotationBpmInstance, quotation: QuotationMain) -> None:

@@ -14,6 +14,8 @@ tmp/
 tmp_*.py
 *.xls
 *.xlsx
+!通用报价单格式.xlsx
+70A3D*
 
 # 评估/工具脚本（非应用代码）
 scripts/

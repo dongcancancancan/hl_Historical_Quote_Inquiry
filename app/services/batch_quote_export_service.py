@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import re
+from copy import copy
 from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
-import xlrd
-import xlwt
+from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 from sqlalchemy.orm import Session
 
 from app.models.calc_param import QuotationCalcParam
 from app.models.quotation import QuotationBpmInstance, QuotationMain
 from app.services.bpm_instance_service import REVIEW_PARAM_FIELDS
-from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE
+from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE, normalize_vat_multiplier, normalize_vat_rate
 from app.services.copper_scenario_service import _calculate_one_band
 from app.services.glue_calc_service import _is_jacket_row
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-GENERAL_TEMPLATE_PATH = PROJECT_ROOT / "通用报价单格式.xls"
+GENERAL_TEMPLATE_PATH = PROJECT_ROOT / "通用报价单格式.xlsx"
 GENERAL_TEMPLATE_SHEET = "2000"
+GENERAL_TEMPLATE_ID = "general_quote_xls"
+
+QUOTE_TEMPLATES = {
+    GENERAL_TEMPLATE_ID: {
+        "id": GENERAL_TEMPLATE_ID,
+        "name": "通用报价单格式",
+        "filename": GENERAL_TEMPLATE_PATH.name,
+        "sheet_name": GENERAL_TEMPLATE_SHEET,
+        "description": "鸿林通用报价单模板",
+    }
+}
 
 TEMPLATE_BANDS = [
     {"label": "90001-92000", "header": "含税铜价\n90001-92000", "copper_price": Decimal("92000")},
@@ -40,7 +52,9 @@ def render_general_batch_quote_excel(
     db: Session,
     instance_ids: list[int],
     operator: str,
+    template_id: str = GENERAL_TEMPLATE_ID,
 ) -> tuple[BytesIO, str]:
+    template = _get_quote_template(template_id)
     ordered_ids = _normalize_instance_ids(instance_ids)
     if not ordered_ids:
         raise ValueError("请先选择需要导出报价单的 BPM 实例")
@@ -79,17 +93,39 @@ def render_general_batch_quote_excel(
         if quotation.customer_address:
             customer_addresses.append(quotation.customer_address)
 
-    template_meta = _load_template_meta()
-    buffer = _render_workbook(
-        template_meta=template_meta,
+    bpm_no = _shared_text(bpm_values)
+    customer_name = _shared_text(customer_names)
+    customer_address = _shared_text(customer_addresses)
+    buffer = _render_workbook_from_template(
+        template=template,
         rows=export_rows,
-        bpm_no=_shared_text(bpm_values),
-        customer_name=_shared_text(customer_names),
-        customer_address=_shared_text(customer_addresses),
+        bpm_no=bpm_no,
+        customer_name=customer_name,
+        customer_address=customer_address,
         operator=operator,
     )
     bpm_for_name = _shared_text(bpm_values) or datetime.now().strftime("%Y%m%d%H%M%S")
-    return buffer, f"{bpm_for_name}-报价单.xls"
+    return buffer, f"{bpm_for_name}-报价单.xlsx"
+
+
+def list_quote_templates() -> list[dict]:
+    return [
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "filename": item["filename"],
+            "description": item["description"],
+        }
+        for item in QUOTE_TEMPLATES.values()
+    ]
+
+
+def _get_quote_template(template_id: str | None) -> dict:
+    selected_id = template_id or GENERAL_TEMPLATE_ID
+    template = QUOTE_TEMPLATES.get(selected_id)
+    if not template:
+        raise ValueError(f"未知报价单模板：{selected_id}")
+    return template
 
 
 def _build_export_row(db: Session, quotation: QuotationMain, instance: QuotationBpmInstance) -> dict:
@@ -112,7 +148,7 @@ def _calculate_template_bands(db: Session, quotation: QuotationMain, instance: Q
     simulated_params = SimpleNamespace(
         copper_rod_process_fee=instance.copper_rod_process_fee
         or (params.copper_rod_process_fee if params else DEFAULT_COPPER_ROD_PROCESS_FEE),
-        vat_rate=instance.vat_rate or (params.vat_rate if params else DEFAULT_VAT_RATE),
+        vat_rate=normalize_vat_multiplier(params.vat_rate if params else DEFAULT_VAT_RATE),
     )
     original_values = _snapshot_review_values(quotation)
     try:
@@ -140,7 +176,7 @@ def _apply_instance_review_values(quotation: QuotationMain, instance: QuotationB
         if value is not None:
             setattr(quotation, field, value)
     if instance.vat_rate is not None:
-        quotation.vat_rate = instance.vat_rate
+        quotation.vat_rate = normalize_vat_rate(instance.vat_rate)
 
 
 def _restore_review_values(quotation: QuotationMain, values: dict) -> None:
@@ -198,173 +234,132 @@ def _extract_od_or_id(quotation: QuotationMain, jacket_row) -> str:
     return ""
 
 
-def _load_template_meta() -> dict:
-    if not GENERAL_TEMPLATE_PATH.exists():
-        raise ValueError(f"未找到报价单模板：{GENERAL_TEMPLATE_PATH}")
-    book = xlrd.open_workbook(str(GENERAL_TEMPLATE_PATH), formatting_info=True)
-    sheet = book.sheet_by_name(GENERAL_TEMPLATE_SHEET)
-    headers = []
-    for idx, band in enumerate(TEMPLATE_BANDS, start=3):
-        value = str(sheet.cell_value(12, idx) or "").strip()
-        headers.append(value or band["header"])
-    footer_notes = []
-    for row_idx in range(18, 26):
-        value = str(sheet.cell_value(row_idx, 0) or "").strip()
-        if value:
-            footer_notes.append(value)
-    return {
-        "sheet_name": GENERAL_TEMPLATE_SHEET,
-        "copper_headers": headers,
-        "footer_notes": footer_notes,
-        "col_widths": [sheet.colinfo_map.get(col).width if sheet.colinfo_map.get(col) else None for col in range(13)],
-        "row_heights": {row + 1: sheet.rowinfo_map.get(row).height for row in range(29) if sheet.rowinfo_map.get(row)},
-    }
+def _template_path(template: dict) -> Path:
+    return PROJECT_ROOT / template["filename"]
 
 
-def _render_workbook(
-    template_meta: dict,
+def _render_workbook_from_template(
+    template: dict,
     rows: list[dict],
     bpm_no: str,
     customer_name: str,
     customer_address: str,
     operator: str,
 ) -> BytesIO:
-    workbook = xlwt.Workbook(encoding="utf-8")
-    sheet = workbook.add_sheet(template_meta["sheet_name"], cell_overwrite_ok=True)
-    _apply_sheet_dimensions(sheet, template_meta)
-    styles = _build_styles()
+    template_path = _template_path(template)
+    if not template_path.exists():
+        raise ValueError(f"未找到报价单模板：{template_path}")
 
-    for row_idx in range(1, 6):
-        _set_row_height(sheet, template_meta, row_idx, row_idx)
-        sheet.write_merge(row_idx - 1, row_idx - 1, 0, 12, "", styles["empty"])
-
-    _set_row_height(sheet, template_meta, 6, 6)
-    sheet.write_merge(5, 5, 0, 12, "报价单", styles["title"])
-
-    _set_row_height(sheet, template_meta, 7, 7)
-    sheet.write(6, 0, "客户名称：", styles["label_left"])
-    sheet.write_merge(6, 6, 1, 12, customer_name or "", styles["value_left"])
-
-    _set_row_height(sheet, template_meta, 8, 8)
-    sheet.write(7, 0, "客户地址：", styles["label_left"])
-    sheet.write_merge(7, 7, 1, 12, customer_address or "", styles["value_left"])
-
-    _set_row_height(sheet, template_meta, 9, 9)
-    sheet.write(8, 0, "TEL：", styles["label_left"])
-    sheet.write(8, 1, "", styles["value_left"])
-    sheet.write(8, 2, "FAX：", styles["label_left"])
-    sheet.write_merge(8, 8, 3, 12, "", styles["value_left"])
-
-    _set_row_height(sheet, template_meta, 10, 10)
-    sheet.write(9, 0, "ATTN:", styles["label_left"])
-    sheet.write(9, 1, "", styles["value_left"])
-    sheet.write(9, 2, "FROM:", styles["label_left"])
-    sheet.write_merge(9, 9, 3, 12, operator or "", styles["value_left"])
-
-    _set_row_height(sheet, template_meta, 11, 11)
-    sheet.write(10, 0, "报价编号：", styles["label_left"])
-    sheet.write_merge(10, 10, 1, 7, bpm_no or "", styles["value_left"])
-    sheet.write_merge(10, 10, 8, 12, f"日期：{datetime.now():%Y-%m-%d}", styles["value_center"])
-
-    _set_row_height(sheet, template_meta, 12, 12)
-    sheet.write_merge(11, 12, 0, 0, "品名", styles["header"])
-    sheet.write_merge(11, 12, 1, 1, "规格", styles["header"])
-    sheet.write_merge(11, 12, 2, 2, "成本分析号", styles["header"])
-    sheet.write(11, 3, "", styles["header"])
-    sheet.write_merge(11, 11, 4, 12, "含税13%单价", styles["header"])
-
-    _set_row_height(sheet, template_meta, 13, 13)
-    sheet.write(12, 3, template_meta["copper_headers"][0], styles["header_wrap"])
-    for index, header in enumerate(template_meta["copper_headers"][1:], start=4):
-        sheet.write(12, index, header, styles["header_wrap"])
-
-    data_start_row = 14
-    detail_count = max(len(rows), 4)
-    for offset in range(detail_count):
-        row_no = data_start_row + offset
-        _set_row_height(sheet, template_meta, row_no, 14 if offset == 0 else 15)
-        row = rows[offset] if offset < len(rows) else None
-        _write_detail_row(sheet, row_no - 1, row, styles)
-
-    footer_row = data_start_row + detail_count
-    _set_row_height(sheet, template_meta, footer_row, 18)
-    sheet.write(footer_row - 1, 0, "备注：", styles["footer"])
-    sheet.write_merge(footer_row - 1, footer_row - 1, 9, 12, "", styles["footer_box"])
-
-    for idx, note in enumerate(template_meta["footer_notes"], start=1):
-        row_no = footer_row + idx
-        _set_row_height(sheet, template_meta, row_no, 19)
-        sheet.write_merge(row_no - 1, row_no - 1, 0, 12, note, styles["footer_note"])
-
-    sign_row = footer_row + len(template_meta["footer_notes"]) + 3
-    _set_row_height(sheet, template_meta, sign_row, 29)
-    sheet.write_merge(sign_row - 1, sign_row - 1, 0, 12, "客户回签 / 核准", styles["sign"])
-
+    workbook = load_workbook(template_path)
+    if template["sheet_name"] not in workbook.sheetnames:
+        raise ValueError(f"报价单模板中未找到工作表：{template['sheet_name']}")
+    sheet = workbook[template["sheet_name"]]
+    _fill_template_sheet(sheet, rows, bpm_no, customer_name, customer_address, operator)
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
     return buffer
 
 
-def _apply_sheet_dimensions(sheet, template_meta: dict) -> None:
-    for index, width in enumerate(template_meta.get("col_widths") or []):
-        sheet.col(index).width = width or 256 * 12
+def _fill_template_sheet(
+    sheet,
+    rows: list[dict],
+    bpm_no: str,
+    customer_name: str,
+    customer_address: str,
+    operator: str,
+) -> None:
+    detail_start_row = 14
+    reserved_detail_rows = 4
+    detail_count = max(len(rows), reserved_detail_rows)
+    extra_rows = max(0, detail_count - reserved_detail_rows)
+    if extra_rows:
+        insert_at = detail_start_row + reserved_detail_rows
+        sheet.insert_rows(insert_at, extra_rows)
+        _shift_images_below(sheet, insert_at, extra_rows)
+        source_row = insert_at - 1
+        for offset in range(extra_rows):
+            _copy_row_format(sheet, source_row, insert_at + offset, max_col=13)
+
+    # 解除数据行区域内的合并单元格，避免铜段价格写入时互相覆盖
+    first_data_row = detail_start_row
+    last_data_row = detail_start_row + detail_count - 1
+    _unmerge_data_area(sheet, first_data_row, last_data_row)
+
+    _set_cell_value(sheet, 7, 2, customer_name or "")
+    _set_cell_value(sheet, 8, 2, customer_address or "")
+    _set_cell_value(sheet, 10, 4, operator or "")
+    _set_cell_value(sheet, 11, 2, bpm_no or "")
+    _set_cell_value(sheet, 11, 9, f"日期：{datetime.now():%Y-%m-%d}")
+
+    for offset in range(detail_count):
+        row = rows[offset] if offset < len(rows) else None
+        _write_template_detail_row(sheet, detail_start_row + offset, row)
 
 
-def _write_detail_row(sheet, row_idx: int, row: dict | None, styles: dict) -> None:
+
+def _write_template_detail_row(sheet, row_no: int, row: dict | None) -> None:
     values = ["", "", "", *[""] * 10]
     if row:
         values[0] = row["product_name"]
         values[1] = row["product_spec"]
         values[2] = row["quotation_code"]
         for idx, price in enumerate(row["band_prices"], start=3):
-            values[idx] = price
-    for col_idx, value in enumerate(values):
-        style = styles["detail_left"] if col_idx in {0, 1, 2} else styles["detail_center"]
-        if col_idx in range(3, 13):
-            style = styles["detail_numeric"]
-            sheet.write(row_idx, col_idx, _excel_number(value), style)
-            continue
-        sheet.write(row_idx, col_idx, value, style)
+            values[idx] = _excel_number(price)
+    for index, value in enumerate(values, start=1):
+        _set_cell_value(sheet, row_no, index, value)
 
 
-def _set_row_height(sheet, template_meta: dict, target_row_no: int, template_row_no: int) -> None:
-    height = (template_meta.get("row_heights") or {}).get(template_row_no)
-    if height:
-        sheet.row(target_row_no - 1).height = height
-        sheet.row(target_row_no - 1).height_mismatch = True
+def _set_cell_value(sheet, row_no: int, col_no: int, value) -> None:
+    cell = sheet.cell(row=row_no, column=col_no)
+    if isinstance(cell, MergedCell):
+        cell = _merged_range_anchor(sheet, row_no, col_no)
+    cell.value = value
 
 
-def _build_styles() -> dict:
-    base_font = "font: name Arial, height 220;"
-    title_font = "font: name Arial, bold on, height 320;"
-    header_font = "font: name Arial, bold on, height 220;"
-    border_all = "borders: left thin, right thin, top thin, bottom thin;"
-    align_center = "align: horiz center, vert center;"
-    align_left = "align: horiz left, vert center;"
-    wrap_center = "align: horiz center, vert center, wrap on;"
-    wrap_left = "align: horiz left, vert center, wrap on;"
-    return {
-        "empty": xlwt.easyxf(base_font),
-        "title": xlwt.easyxf(
-            f"{title_font} {border_all} {align_center}"
-        ),
-        "label_left": xlwt.easyxf(f"{base_font} {border_all} {align_left}"),
-        "value_left": xlwt.easyxf(f"{base_font} {border_all} {align_left}"),
-        "value_center": xlwt.easyxf(f"{base_font} {border_all} {align_center}"),
-        "header": xlwt.easyxf(f"{header_font} {border_all} {align_center}"),
-        "header_wrap": xlwt.easyxf(f"{header_font} {border_all} {wrap_center}"),
-        "detail_left": xlwt.easyxf(f"{base_font} {border_all} {wrap_left}"),
-        "detail_center": xlwt.easyxf(f"{base_font} {border_all} {align_center}"),
-        "detail_numeric": xlwt.easyxf(
-            f"{base_font} {border_all} {align_center}",
-            num_format_str="0.0000",
-        ),
-        "footer": xlwt.easyxf(f"{base_font} {align_left}"),
-        "footer_box": xlwt.easyxf(f"{base_font} {border_all} {align_left}"),
-        "footer_note": xlwt.easyxf(f"{base_font} {align_left}"),
-        "sign": xlwt.easyxf(f"{header_font} {border_all} {align_center}"),
-    }
+def _merged_range_anchor(sheet, row_no: int, col_no: int):
+    for merged_range in sheet.merged_cells.ranges:
+        if merged_range.min_row <= row_no <= merged_range.max_row and merged_range.min_col <= col_no <= merged_range.max_col:
+            return sheet.cell(row=merged_range.min_row, column=merged_range.min_col)
+    return sheet.cell(row=row_no, column=col_no)
+
+
+def _unmerge_data_area(sheet, first_row: int, last_row: int) -> None:
+    """移除数据行区域内的所有合并单元格。"""
+    to_remove = []
+    for merged_range in sheet.merged_cells.ranges:
+        if merged_range.min_row <= last_row and merged_range.max_row >= first_row:
+            to_remove.append(str(merged_range))
+    for ref in to_remove:
+        sheet.unmerge_cells(ref)
+
+
+def _copy_row_format(sheet, source_row: int, target_row: int, max_col: int) -> None:
+    source_dimension = sheet.row_dimensions[source_row]
+    target_dimension = sheet.row_dimensions[target_row]
+    target_dimension.height = source_dimension.height
+    target_dimension.hidden = source_dimension.hidden
+    for col_no in range(1, max_col + 1):
+        source_cell = sheet.cell(row=source_row, column=col_no)
+        target_cell = sheet.cell(row=target_row, column=col_no)
+        if source_cell.has_style:
+            target_cell._style = copy(source_cell._style)
+        target_cell.number_format = source_cell.number_format
+        target_cell.font = copy(source_cell.font)
+        target_cell.fill = copy(source_cell.fill)
+        target_cell.border = copy(source_cell.border)
+        target_cell.alignment = copy(source_cell.alignment)
+        target_cell.protection = copy(source_cell.protection)
+
+
+def _shift_images_below(sheet, insert_at_row: int, amount: int) -> None:
+    threshold = insert_at_row - 1
+    for image in getattr(sheet, "_images", []):
+        anchor = getattr(image, "anchor", None)
+        for attr in ("_from", "_to", "to"):
+            marker = getattr(anchor, attr, None)
+            if marker is not None and getattr(marker, "row", -1) >= threshold:
+                marker.row += amount
 
 
 def _normalize_instance_ids(instance_ids: list[int]) -> list[int]:

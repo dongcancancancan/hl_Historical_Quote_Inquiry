@@ -38,8 +38,7 @@ from app.services.glue_calc_service import calculate_glue_materials, list_glue_t
 from app.services.price_summary_calc_service import calculate_price_summary, list_price_summary_traces
 from app.services.full_price_calc_service import calculate_full_price
 from app.services.calculation_skill_engine import list_calculation_skills
-from app.services.calculation_diagnosis_service import diagnose_calculation
-from app.services.batch_quote_export_service import render_general_batch_quote_excel
+from app.services.batch_quote_export_service import list_quote_templates, render_general_batch_quote_excel
 from app.services.excel_service import render_quote_snapshot_excel, render_quotation_excel
 from app.services.calculation_run_service import latest_successful_run, record_successful_calculation_run
 from app.services.quote_snapshot_service import create_quote_snapshot, get_active_snapshot, snapshot_dict
@@ -78,7 +77,9 @@ class QuotationReviewStatusRequest(BaseModel):
 class QuotationCalcParamRequest(BaseModel):
     copper_price: str | int | float | None = None
     copper_rod_process_fee: str | int | float = "1055"
-    vat_rate: str | int | float = "1.13"
+    conductor_vat_rate: str | int | float | None = None
+    vat_rate: str | int | float | None = None
+    ul_label_fee: str | int | float | None = None
     transport_fee: str | int | float | None = None
     other_fee: str | int | float | None = None
     net_profit_rate: str | int | float | None = None
@@ -102,14 +103,11 @@ class BatchDeleteRequest(BaseModel):
 
 class BatchQuoteExportRequest(BaseModel):
     instance_ids: list[int] = Field(default_factory=list)
+    template_id: str = "general_quote_xls"
 
 
 class CopperScenarioRequest(BaseModel):
     bpm_no: str
-
-
-class CalculationDiagnosisRequest(BaseModel):
-    error_message: str | None = None
 
 
 class RoutingTestRequest(BaseModel):
@@ -200,6 +198,8 @@ def _clear_full_price_outputs(quotation: QuotationMain, instance: QuotationBpmIn
         instance.profit_selling_price = None
         instance.non_profit_price = None
         instance.final_selling_price = None
+        instance.material_ratio = None
+        instance.order_weight = None
         instance.updater = operator
         instance.update_time = now
 
@@ -452,6 +452,7 @@ def save_batch_calc_params(
             skipped.append({"quotation_code": str(target_value), "reason": "未找到或无权限"})
             continue
         quotation, instance = context
+        old_tags = None
         try:
             update_instance_calc_params(db, quotation, instance, req.model_dump(exclude_unset=True), user.display_name)
             updated += 1
@@ -459,6 +460,7 @@ def save_batch_calc_params(
                 sync_instance_calc_params_to_engine(db, quotation, instance, user.display_name)
                 old_tags = _prepare_instance_calculation(quotation, instance)
                 _clear_full_price_outputs(quotation, instance, user.display_name)
+                db.commit()
                 price_result = calculate_full_price(db, quotation, user.display_name)
                 _restore_instance_calculation(quotation, instance, old_tags)
                 record_successful_calculation_run(db, quotation, instance, "full_price", user.display_name, price_result)
@@ -467,9 +469,15 @@ def save_batch_calc_params(
                 calculated += 1
         except ValueError as exc:
             db.rollback()
+            if old_tags is not None:
+                _restore_instance_calculation(quotation, instance, old_tags)
+                db.commit()
             skipped.append({"quotation_code": quotation.quotation_code or str(target_value), "reason": str(exc)})
         except Exception as exc:
             db.rollback()
+            if old_tags is not None:
+                _restore_instance_calculation(quotation, instance, old_tags)
+                db.commit()
             logger.exception("Batch calc params failed for %s", target_value)
             skipped.append({"quotation_code": quotation.quotation_code or str(target_value), "reason": str(exc)})
     return {"updated": updated, "calculated": calculated, "skipped": skipped}
@@ -525,15 +533,23 @@ def export_batch_quote(
             db=db,
             instance_ids=req.instance_ids,
             operator=user.display_name,
+            template_id=req.template_id,
         )
         encoded_filename = quote(filename)
         return StreamingResponse(
             buffer,
-            media_type="application/vnd.ms-excel",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/quotation/export-batch-quote/templates")
+def get_batch_quote_templates(user: UserContext = Depends(get_current_user)):
+    if not user.is_reviewer:
+        raise HTTPException(status_code=403, detail="仅审价科账号可以查看报价单模板")
+    return {"items": list_quote_templates()}
 
 
 @router.post("/quotation/copper-scenarios")
@@ -709,20 +725,6 @@ def get_calculation_skills(
     if not user.is_reviewer:
         raise HTTPException(status_code=403, detail="仅审价科账号可以查看计算 Skill")
     return {"items": list_calculation_skills()}
-
-
-@router.post("/quotation/calculate/diagnose")
-async def diagnose_quotation_calculation(
-    req: CalculationDiagnosisRequest,
-    code: str = "",
-    instance_id: int | None = None,
-    db: Session = Depends(get_db),
-    user: UserContext = Depends(get_current_user),
-):
-    if not user.is_reviewer:
-        raise HTTPException(status_code=403, detail="仅审价科账号可以执行计算诊断")
-    quotation, instance = _get_context_or_404(db, user, code, instance_id)
-    return await diagnose_calculation(db, quotation, req.error_message)
 
 
 @router.post("/quotation/calculate/route-test")

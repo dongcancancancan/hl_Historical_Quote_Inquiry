@@ -5,8 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.models.calc_param import QuotationCalcParam
 from app.models.quotation import QuotationBpmInstance, QuotationMain
-from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE
+from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE, normalize_vat_multiplier, normalize_vat_rate
 from app.services.conductor_calc_service import (
+    _is_braiding_material,
+    _is_braiding_process,
     _is_conductor_row,
     _match_copper_fee,
     _match_process_fee_rows,
@@ -21,9 +23,11 @@ from app.services.glue_calc_service import (
     _is_insulation_row,
     _is_jacket_row,
     _is_package_tape_process,
+    _is_pair_twist_process,
     _is_rewind_process,
     _match_insulation_process_fee_row,
     _match_jacket_process_fee_row,
+    _spec_ends_with_p,
 )
 
 
@@ -73,7 +77,7 @@ def calculate_bpm_copper_scenarios(db: Session, bpm_no: str) -> dict:
         if instance:
             params = SimpleNamespace(
                 copper_rod_process_fee=instance.copper_rod_process_fee or (params.copper_rod_process_fee if params else DEFAULT_COPPER_ROD_PROCESS_FEE),
-                vat_rate=instance.vat_rate or (params.vat_rate if params else DEFAULT_VAT_RATE),
+                vat_rate=normalize_vat_multiplier(params.vat_rate if params else DEFAULT_VAT_RATE),
             )
         result_by_band = []
         errors = []
@@ -115,6 +119,7 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
     material_amounts = {}
     process_subtotals = {}
     used_process_ids: set[int] = set()
+    braiding_process_pairs = []
 
     conductor_rows = [item for item in quotation.materials if not item.deleted and _is_conductor_row(item)]
     if not conductor_rows:
@@ -134,6 +139,9 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
 
         for process in _match_process_fee_rows(quotation, item, used_process_ids):
             used_process_ids.add(process.id)
+            if _is_braiding_material(item) or _is_braiding_process(process):
+                braiding_process_pairs.append((item, process))
+                continue
             process_amount = _round4(_decimal(process.startup_loss_wire) * material_amount)
             process_subtotals[process.id] = _round4(
                 _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
@@ -161,6 +169,13 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
         for item in quotation.materials
         if not item.deleted
     )
+
+    for item, process in braiding_process_pairs:
+        base_amount = _simulated_braiding_base_amount(quotation, item, material_amounts)
+        process_amount = _round4(_decimal(process.startup_loss_wire) * base_amount)
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
 
     for item in [row for row in quotation.materials if not row.deleted and _is_jacket_row(row)]:
         process = _match_jacket_process_fee_row(quotation, item)
@@ -193,6 +208,15 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
 
     for process in [row for row in quotation.processes if not row.deleted and _is_rewind_process(row)]:
         process_amount = _round4(_decimal(process.startup_loss_wire) * all_material_amount)
+        process_subtotals[process.id] = _round4(
+            _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
+        )
+
+    for process in [row for row in quotation.processes if not row.deleted and _is_pair_twist_process(row)]:
+        amounts = _simulated_pair_twist_material_amounts(quotation, material_amounts)
+        if amounts["total"] <= 0:
+            continue
+        process_amount = _round4(_decimal(process.startup_loss_wire) * amounts["total"])
         process_subtotals[process.id] = _round4(
             _decimal(process.fixed_fee) + process_amount * _decimal(quotation.order_startup_times)
         )
@@ -232,7 +256,8 @@ def _calculate_one_band(db: Session, quotation: QuotationMain, params, copper_pr
         + _decimal(quotation.irradiation_core_count) * _decimal(quotation.irradiation_core_fee)
         + _decimal(quotation.transport_fee) * unit_usage_sum
     )
-    tax_multiplier = Decimal("1") + _decimal(quotation.vat_rate)
+    vat_rate = normalize_vat_rate(quotation.vat_rate) if quotation.vat_rate is not None else Decimal("0")
+    tax_multiplier = Decimal("1") + vat_rate
     finance_multiplier = Decimal("1") + _decimal(quotation.operating_expense_rate) + _decimal(quotation.monthly_interest)
     profit_selling_price = _round4((cost / (Decimal("1") - net_profit_rate) + shared_fee) * tax_multiplier * finance_multiplier)
     non_profit_price = _round4((cost + shared_fee) * tax_multiplier * finance_multiplier)
@@ -271,8 +296,27 @@ def _simulated_conductor_material_amount_before(quotation: QuotationMain, insula
         candidates = [
             item for item in quotation.materials
             if not item.deleted and item.id != insulation_item.id and _is_core_conductor_row(item)
-        ]
+    ]
     return _round4(sum(material_amounts.get(item.id, _decimal(item.material_amount)) for item in candidates))
+
+
+def _simulated_braiding_base_amount(
+    quotation: QuotationMain,
+    braiding_item,
+    material_amounts: dict[int, Decimal],
+) -> Decimal:
+    materials = sorted(
+        [item for item in quotation.materials if not item.deleted],
+        key=lambda item: (item.seq_no if item.seq_no is not None else 10**9, item.id or 0),
+    )
+    braiding_key = (braiding_item.seq_no if braiding_item.seq_no is not None else 10**9, braiding_item.id or 0)
+    total = _round4(sum(material_amounts.get(item.id, _decimal(item.material_amount)) for item in materials))
+    excluded_after = _round4(sum(
+        material_amounts.get(item.id, _decimal(item.material_amount))
+        for item in materials
+        if (item.seq_no if item.seq_no is not None else 10**9, item.id or 0) > braiding_key
+    ))
+    return _round4(total - excluded_after)
 
 
 def _simulated_collection_material_amounts(quotation: QuotationMain, material_amounts: dict[int, Decimal]) -> dict[str, Decimal | bool]:
@@ -298,6 +342,40 @@ def _simulated_collection_material_amounts(quotation: QuotationMain, material_am
         "has_core_twist": bool(core_twist_rows),
         "total": _round4(copper_amount + core_press_amount + core_twist_amount),
     }
+
+
+def _simulated_pair_twist_material_amounts(quotation: QuotationMain, material_amounts: dict[int, Decimal]) -> dict[str, Decimal]:
+    p_suffix_copper_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item) and _spec_ends_with_p(item)
+    ]
+    p_suffix_insulation_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_insulation_row(item) and _spec_ends_with_p(item)
+    ]
+    all_copper_amount = _round4(sum(
+        material_amounts.get(item.id, _decimal(item.material_amount))
+        for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item)
+    ))
+    all_insulation_amount = _round4(sum(
+        material_amounts.get(item.id, _decimal(item.material_amount))
+        for item in quotation.materials
+        if not item.deleted and _is_insulation_row(item)
+    ))
+    if p_suffix_copper_rows and p_suffix_insulation_rows:
+        p_suffix_copper_amount = _round4(sum(
+            material_amounts.get(item.id, _decimal(item.material_amount))
+            for item in p_suffix_copper_rows
+        ))
+        p_suffix_insulation_amount = _round4(sum(
+            material_amounts.get(item.id, _decimal(item.material_amount))
+            for item in p_suffix_insulation_rows
+        ))
+        return {"total": _round4(p_suffix_copper_amount + p_suffix_insulation_amount)}
+    if not p_suffix_copper_rows and not p_suffix_insulation_rows:
+        return {"total": _round4(all_copper_amount + all_insulation_amount)}
+    return {"total": Decimal("0")}
 
 
 def _decimal(value) -> Decimal:

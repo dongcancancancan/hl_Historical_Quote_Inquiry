@@ -73,10 +73,10 @@
                 @change="handleCalcParamInput"
               />
             </el-form-item>
-            <el-form-item label="增值税率">
+            <el-form-item label="增值税率（铜杆）">
               <el-input-number
-                v-model="calcParams.vat_rate"
-                :class="{ 'param-invalid': !!calcInputErrors.vat_rate }"
+                v-model="calcParams.conductor_vat_rate"
+                :class="{ 'param-invalid': !!calcInputErrors.conductor_vat_rate }"
                 size="small"
                 :min="0"
                 :step="0.0001"
@@ -95,7 +95,6 @@
             <el-button size="small" type="success" plain :loading="routeTestLoading" @click="openRouteTestDialog">
               Skill 路由测试
             </el-button>
-            <el-button size="small" type="primary" plain @click="runDiagnosis">AI 辅助分析</el-button>
             <el-button size="small" type="warning" plain @click="showAllTraces">查看计算过程</el-button>
             <el-dropdown trigger="click">
               <el-button size="small">
@@ -124,8 +123,6 @@
       <DiagnosisPanel
         :selected-code="selectedCode"
         :diagnosis="currentDiagnosis"
-        :loading="diagnosisLoading"
-        @diagnose="runDiagnosis"
         @skills="showSkills"
       />
     </main>
@@ -290,7 +287,6 @@ import {
   assertReviewerSession,
   calculate,
   clearUnitPrices as clearUnitPricesApi,
-  diagnose,
   exportExcel,
   fetchCalcParams,
   fetchPreview,
@@ -330,7 +326,6 @@ const saveStatus = ref("");
 const calcStatus = ref("");
 const calcStatusTone = ref<StatusTone>("info");
 const calculationInFlight = ref(false);
-const diagnosisLoading = ref(false);
 const diagnosisCache = reactive<Record<string, DiagnosisResult>>({});
 const lastCalculationError = ref("");
 const traceVisible = ref(false);
@@ -349,17 +344,19 @@ let calcParamSavingPromise: Promise<boolean> | null = null;
 const calcParams = reactive<CalcParams>({
   copper_price: "",
   copper_rod_process_fee: "1055",
-  vat_rate: "1.13",
+  conductor_vat_rate: "1.13",
+  vat_rate: "",
 });
 const savedCalcParams = reactive<CalcParams>({
   copper_price: "",
   copper_rod_process_fee: "1055",
-  vat_rate: "1.13",
+  conductor_vat_rate: "1.13",
+  vat_rate: "",
 });
 const calcInputErrors = reactive<Partial<Record<keyof CalcParams, string>>>({
   copper_price: "",
   copper_rod_process_fee: "",
-  vat_rate: "",
+  conductor_vat_rate: "",
   update_time: "",
 });
 
@@ -446,9 +443,11 @@ async function loadCalcParams(): Promise<void> {
 function assignCalcParams(data: Partial<CalcParams>): void {
   calcParams.copper_price = paramText(data.copper_price, "");
   calcParams.copper_rod_process_fee = paramText(data.copper_rod_process_fee, "1055");
-  calcParams.vat_rate = paramText(data.vat_rate, "1.13");
+  calcParams.conductor_vat_rate = paramText(data.conductor_vat_rate ?? data.vat_rate, "1.13");
+  calcParams.vat_rate = paramText(data.vat_rate, "");
   savedCalcParams.copper_price = calcParams.copper_price;
   savedCalcParams.copper_rod_process_fee = calcParams.copper_rod_process_fee;
+  savedCalcParams.conductor_vat_rate = calcParams.conductor_vat_rate;
   savedCalcParams.vat_rate = calcParams.vat_rate;
 }
 
@@ -460,7 +459,7 @@ function paramText(value: unknown, fallback = ""): string {
 function resetCalcErrors(): void {
   calcInputErrors.copper_price = "";
   calcInputErrors.copper_rod_process_fee = "";
-  calcInputErrors.vat_rate = "";
+  calcInputErrors.conductor_vat_rate = "";
 }
 
 function normalizeNumberText(value: unknown): string {
@@ -471,7 +470,7 @@ function normalizeNumberText(value: unknown): string {
 }
 
 function hasCalcParamChanges(): boolean {
-  return ["copper_price", "copper_rod_process_fee", "vat_rate"].some(
+  return ["copper_price", "copper_rod_process_fee", "conductor_vat_rate"].some(
     (key) => normalizeNumberText(calcParams[key as keyof CalcParams]) !== normalizeNumberText(savedCalcParams[key as keyof CalcParams]),
   );
 }
@@ -480,7 +479,7 @@ function validateCalcParams(): { ok: boolean; message: string } {
   resetCalcErrors();
   const copperPrice = Number(calcParams.copper_price);
   const rodFee = Number(calcParams.copper_rod_process_fee);
-  const vatRate = Number(calcParams.vat_rate);
+  const conductorVatRate = Number(calcParams.conductor_vat_rate);
   if (!calcParams.copper_price) {
     calcInputErrors.copper_price = "必填";
     return { ok: false, message: "铜价未填写。请填写铜价，系统会自动保存后再计算。" };
@@ -493,9 +492,9 @@ function validateCalcParams(): { ok: boolean; message: string } {
     calcInputErrors.copper_rod_process_fee = "需大于等于 0";
     return { ok: false, message: "铜杆加工费必须是大于等于 0 的数字。" };
   }
-  if (!Number.isFinite(vatRate) || vatRate <= 0) {
-    calcInputErrors.vat_rate = "需大于 0";
-    return { ok: false, message: "增值税率必须是大于 0 的数字。" };
+  if (!Number.isFinite(conductorVatRate) || conductorVatRate <= 0) {
+    calcInputErrors.conductor_vat_rate = "需大于 0";
+    return { ok: false, message: "增值税率（铜杆）必须是大于 0 的数字。" };
   }
   return { ok: true, message: "" };
 }
@@ -556,7 +555,7 @@ async function saveCalcParamsInternal(auto: boolean): Promise<boolean> {
       const data = await saveCalcParams(code, instanceId, {
         copper_price: paramText(calcParams.copper_price, ""),
         copper_rod_process_fee: paramText(calcParams.copper_rod_process_fee, "1055"),
-        vat_rate: paramText(calcParams.vat_rate, "1.13"),
+        conductor_vat_rate: paramText(calcParams.conductor_vat_rate, "1.13"),
       });
       if (selectedCode.value === code && selectedInstanceId.value === instanceId) {
         assignCalcParams(data);
@@ -626,12 +625,12 @@ async function runCalculation(message: string, type: "conductor" | "glue" | "ful
 function buildCalculationStatus(data: Record<string, any>, type: string): string {
   if (type === "conductor") return `已计算材料 ${data.calculated || 0} 行，制程费用 ${data.process_calculated || 0} 行`;
   if (type === "glue") {
-    return `已计算胶料 ${data.c_calculated || 0} 行，外购 ${data.external_calculated || 0} 行，色母 ${data.color_masterbatch_calculated || 0} 行，包带制程 ${data.package_tape_process_calculated || 0} 行`;
+    return `已计算胶料 ${data.c_calculated || 0} 行，外购 ${data.external_calculated || 0} 行，色母 ${data.color_masterbatch_calculated || 0} 行，包带制程 ${data.package_tape_process_calculated || 0} 行，对绞制程 ${data.pair_twist_process_calculated || 0} 行`;
   }
   const conductor = data.conductor || {};
   const glue = data.glue || {};
   const price = data.price_summary || {};
-  return `最终售价已计算：导体/编织 ${conductor.calculated || 0} 行，胶料 ${glue.c_calculated || 0} 行，外购 ${glue.external_calculated || 0} 行，包带制程 ${glue.package_tape_process_calculated || 0} 行，最终售价 ${price.final_selling_price || "-"}`;
+  return `最终售价已计算：导体/编织 ${conductor.calculated || 0} 行，胶料 ${glue.c_calculated || 0} 行，外购 ${glue.external_calculated || 0} 行，包带制程 ${glue.package_tape_process_calculated || 0} 行，对绞制程 ${glue.pair_twist_process_calculated || 0} 行，最终售价 ${price.final_selling_price || "-"}`;
 }
 
 async function showAllTraces(): Promise<void> {
@@ -685,26 +684,6 @@ async function showSkills(): Promise<void> {
     ElMessage.error("计算 Skill 加载失败：" + err.message);
   } finally {
     traceLoading.value = false;
-  }
-}
-
-async function runDiagnosis(errorMessage = ""): Promise<void> {
-  if (!selectedCode.value) return;
-  const validation = validateCalcParams();
-  if (!validation.ok) {
-    renderLocalDiagnosis(validation.message);
-    setCalcStatus(validation.message, "danger");
-    return;
-  }
-  diagnosisLoading.value = true;
-  setCalcStatus("AI 辅助分析中...", "info");
-  try {
-    diagnosisCache[selectedCode.value] = await diagnose(selectedCode.value, selectedInstanceId.value, errorMessage || lastCalculationError.value);
-    setCalcStatus("", "info");
-  } catch (err: any) {
-    ElMessage.error("AI 辅助分析失败：" + err.message);
-  } finally {
-    diagnosisLoading.value = false;
   }
 }
 
@@ -894,7 +873,7 @@ function renderLocalDiagnosis(message: string): void {
   diagnosisCache[selectedCode.value] = {
     mode: "local",
     quotation_code: selectedCode.value,
-    summary: `当前问题：${message}\n处理方式：请在上方参数栏补充或修正，系统会自动保存。保存成功后再重新计算。\n系统没有调用 AI。`,
+    summary: `当前问题：${message}\n处理方式：请在上方参数栏补充或修正，系统会自动保存。保存成功后再重新计算。`,
     skills: [],
   };
 }
@@ -905,7 +884,7 @@ function renderRuleDiagnosis(message: string): void {
   diagnosisCache[selectedCode.value] = {
     mode: "rule",
     quotation_code: selectedCode.value,
-    summary: `计算未完成：${message}\n处理方式：请根据缺失的材料单价、制程公式或审价参数维护基础数据；已能计算的结果会保留。处理后重新点击一键计算。\n系统没有自动调用 AI；需要自然语言解释时，可点击“AI 辅助分析”。`,
+    summary: `计算未完成：${message}\n处理方式：请根据缺失的材料单价、制程公式或审价参数维护基础数据；已能计算的结果会保留。处理后重新点击一键计算。`,
     skills: [],
   };
 }

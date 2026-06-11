@@ -41,7 +41,8 @@ def update_calc_params(db: Session, quotation: QuotationMain, data: dict, operat
         data.get("copper_rod_process_fee", DEFAULT_COPPER_ROD_PROCESS_FEE),
         "铜杆加工费",
     )
-    params.vat_rate = _required_positive_decimal(data.get("vat_rate", DEFAULT_VAT_RATE), "增值税率")
+    conductor_vat_rate = data.get("conductor_vat_rate", data.get("vat_rate", params.vat_rate or DEFAULT_VAT_RATE))
+    params.vat_rate = normalize_vat_multiplier(conductor_vat_rate, "增值税率（铜杆）")
     params.updater = operator
     params.update_time = datetime.now()
     db.commit()
@@ -53,7 +54,7 @@ def serialize_calc_params(params: QuotationCalcParam) -> dict:
         "quotation_code": params.quotation_code or "",
         "copper_price": _decimal_text(params.copper_price),
         "copper_rod_process_fee": _decimal_text(params.copper_rod_process_fee),
-        "vat_rate": _decimal_text(params.vat_rate),
+        "conductor_vat_rate": _decimal_text(params.vat_rate),
         "updater": params.updater or "",
         "update_time": params.update_time.isoformat() if params.update_time else None,
     }
@@ -75,6 +76,24 @@ def _required_positive_decimal(value, label: str) -> Decimal:
     result = _required_decimal(value, label)
     if result <= 0:
         raise ValueError(f"{label}必须大于 0")
+    return result
+
+
+def normalize_vat_multiplier(value, label: str = "增值税率") -> Decimal:
+    result = _required_positive_decimal(value, label)
+    if result > Decimal("2"):
+        return Decimal("1") + result / Decimal("100")
+    if result <= Decimal("1"):
+        return Decimal("1") + result
+    return result
+
+
+def normalize_vat_rate(value, label: str = "增值税率") -> Decimal:
+    result = _required_positive_decimal(value, label)
+    if result > Decimal("2"):
+        return result / Decimal("100")
+    if result > Decimal("1"):
+        return result - Decimal("1")
     return result
 
 

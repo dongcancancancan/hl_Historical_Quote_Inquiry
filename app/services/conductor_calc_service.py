@@ -167,7 +167,14 @@ def calculate_conductor_materials(
             startup_loss_wire = Decimal(process.startup_loss_wire or 0)
             fixed_fee = Decimal(process.fixed_fee or 0)
             startup_times = Decimal(quotation.order_startup_times or 0)
-            process_amount = _round4(startup_loss_wire * material_amount)
+            if _is_braiding_material(item) or _is_braiding_process(process):
+                base = _braiding_process_material_base(quotation, item)
+                process_base_amount = base["base_amount"]
+                process_amount = _round4(startup_loss_wire * process_base_amount)
+            else:
+                base = None
+                process_base_amount = material_amount
+                process_amount = _round4(startup_loss_wire * process_base_amount)
             subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
 
             process.amount = process_amount
@@ -186,18 +193,38 @@ def calculate_conductor_materials(
                 "fixed_fee": str(fixed_fee),
                 "order_startup_times": str(startup_times),
                 "material_amount": str(material_amount),
+                "process_base_amount": str(process_base_amount),
             })
-            fee_process_text = (
-                f"匹配制程费用行：{process.process_name or item.process_name or ''}\n"
-                f"金额 = 开机损耗废线 {startup_loss_wire} × 材料金额 {material_amount} = {process_amount}\n"
-                f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
-            )
+            if base:
+                process_input.update({
+                    "braiding_material_id": item.id,
+                    "braiding_material_seq_no": item.seq_no,
+                    "material_amount_sum": str(base["material_amount_sum"]),
+                    "excluded_after_braiding_amount": str(base["excluded_after_amount"]),
+                    "excluded_after_braiding_rows": base["excluded_rows"],
+                })
+                process_formula = "编织金额 = 开机损耗废线 × (材料金额总和 - 编织之后材料金额合计)"
+                excluded_text = "；".join(base["excluded_rows"]) or "无"
+                fee_process_text = (
+                    f"匹配编织制程费用行：{process.process_name or item.process_name or ''}\n"
+                    f"编织之后材料：{excluded_text}\n"
+                    f"参与材料金额 = 材料金额总和 {base['material_amount_sum']} - 编织之后材料金额合计 {base['excluded_after_amount']} = {process_base_amount}\n"
+                    f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {process_base_amount} = {process_amount}\n"
+                    f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+                )
+            else:
+                process_formula = "金额 = 开机损耗废线 × 材料金额"
+                fee_process_text = (
+                    f"匹配制程费用行：{process.process_name or item.process_name or ''}\n"
+                    f"金额 = 开机损耗废线 {startup_loss_wire} × 材料金额 {material_amount} = {process_amount}\n"
+                    f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+                )
             _add_trace(
                 db,
                 quotation,
                 item,
                 "process_amount",
-                "金额 = 开机损耗废线 × 材料金额",
+                process_formula,
                 process_input,
                 fee_process_text,
                 process_amount,
@@ -233,6 +260,103 @@ def calculate_conductor_materials(
     else:
         db.flush()
     return {"calculated": calculated, "process_calculated": process_calculated, "skipped": skipped}
+
+
+def refresh_braiding_process_fees(
+    db: Session,
+    quotation: QuotationMain,
+    operator: str,
+    now: datetime | None = None,
+    ctx: CalculationContext | None = None,
+    replace_existing_traces: bool = False,
+) -> int:
+    """Recalculate braiding process fees after later material rows have been priced."""
+    braiding_materials = [
+        item for item in _sorted_materials(quotation)
+        if _is_braiding_material(item)
+    ]
+    if not braiding_materials:
+        return 0
+    if replace_existing_traces:
+        db.query(QuotationCalculationTrace).filter(
+            QuotationCalculationTrace.quotation_main_id == quotation.id,
+            QuotationCalculationTrace.calc_type == "conductor",
+            QuotationCalculationTrace.run_id.is_(None),
+            QuotationCalculationTrace.material_id.in_([item.id for item in braiding_materials if item.id]),
+            QuotationCalculationTrace.field_name.in_(["process_amount", "process_subtotal_fee"]),
+        ).delete(synchronize_session=False)
+
+    calculated = 0
+    used_process_ids: set[int] = set()
+    now = now or datetime.now()
+    for item in braiding_materials:
+        for process in _match_process_fee_rows(quotation, item, used_process_ids):
+            used_process_ids.add(process.id)
+            base = _braiding_process_material_base(quotation, item)
+            process_base_amount = base["base_amount"]
+            startup_loss_wire = Decimal(process.startup_loss_wire or 0)
+            fixed_fee = Decimal(process.fixed_fee or 0)
+            startup_times = Decimal(quotation.order_startup_times or 0)
+            process_amount = _round4(startup_loss_wire * process_base_amount)
+            subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
+
+            process.amount = process_amount
+            process.subtotal_fee = subtotal_fee
+            process.updater = operator
+            process.update_time = now
+            if ctx:
+                ctx.mark_process(process.id, "conductor")
+            calculated += 1
+
+            process_input = {
+                "material_id": item.id,
+                "process_name": item.process_name,
+                "spec_detail": item.spec_detail,
+                "process_code": item.process_code,
+                "process_fee_id": process.id,
+                "process_fee_name": process.process_name,
+                "startup_loss_wire": str(startup_loss_wire),
+                "fixed_fee": str(fixed_fee),
+                "order_startup_times": str(startup_times),
+                "material_amount": str(Decimal(item.material_amount or 0)),
+                "process_base_amount": str(process_base_amount),
+                "braiding_material_seq_no": item.seq_no,
+                "material_amount_sum": str(base["material_amount_sum"]),
+                "excluded_after_braiding_amount": str(base["excluded_after_amount"]),
+                "excluded_after_braiding_rows": base["excluded_rows"],
+                "refresh_source": "after_material_pricing",
+            }
+            excluded_text = "；".join(base["excluded_rows"]) or "无"
+            fee_process_text = (
+                f"刷新编织制程费用行：{process.process_name or item.process_name or ''}\n"
+                f"编织之后材料：{excluded_text}\n"
+                f"参与材料金额 = 材料金额总和 {base['material_amount_sum']} - 编织之后材料金额合计 {base['excluded_after_amount']} = {process_base_amount}\n"
+                f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {process_base_amount} = {process_amount}\n"
+                f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+            )
+            _add_trace(
+                db,
+                quotation,
+                item,
+                "process_amount",
+                "编织金额 = 开机损耗废线 × (材料金额总和 - 编织之后材料金额合计)",
+                process_input,
+                fee_process_text,
+                process_amount,
+                operator,
+            )
+            _add_trace(
+                db,
+                quotation,
+                item,
+                "process_subtotal_fee",
+                "费用成本小计 = 固定费用 + 金额 × 订单开机次数",
+                process_input,
+                fee_process_text,
+                subtotal_fee,
+                operator,
+            )
+    return calculated
 
 
 def list_conductor_traces(
@@ -308,6 +432,7 @@ def _match_process_fee_rows(
         item for item in quotation.processes
         if not item.deleted and item.id not in used_process_ids
     ]
+    processes.sort(key=lambda item: item.id or 0)
     material_name = _normalize_process_name(material.process_name)
     if material_name:
         exact = [
@@ -328,6 +453,42 @@ def _first_process(processes: list[QuotationProcessFee], predicate) -> list[Quot
         if predicate(process):
             return [process]
     return []
+
+
+def _braiding_process_material_base(quotation: QuotationMain, braiding_material: QuotationMaterial) -> dict:
+    materials = _sorted_materials(quotation)
+    braiding_key = _material_sort_key(braiding_material)
+    material_amount_sum = _round4(sum(Decimal(item.material_amount or 0) for item in materials))
+    excluded_rows = [
+        item for item in materials
+        if _material_sort_key(item) > braiding_key
+    ]
+    excluded_after_amount = _round4(sum(Decimal(item.material_amount or 0) for item in excluded_rows))
+    base_amount = _round4(material_amount_sum - excluded_after_amount)
+    return {
+        "material_amount_sum": material_amount_sum,
+        "excluded_after_amount": excluded_after_amount,
+        "base_amount": base_amount,
+        "excluded_rows": [
+            (
+                f"{item.seq_no or '-'} {item.process_name or '材料'} "
+                f"{item.spec_detail or item.process_code or ''}：{_decimal_text(item.material_amount)}"
+            ).strip()
+            for item in excluded_rows
+        ],
+    }
+
+
+def _sorted_materials(quotation: QuotationMain) -> list[QuotationMaterial]:
+    return sorted(
+        [item for item in quotation.materials if not item.deleted],
+        key=_material_sort_key,
+    )
+
+
+def _material_sort_key(item: QuotationMaterial) -> tuple[int, int]:
+    seq = item.seq_no if item.seq_no is not None else 10**9
+    return int(seq), int(item.id or 0)
 
 
 def _looks_like_external_material_code(value) -> bool:
@@ -477,10 +638,23 @@ def _create_missing_copper_fee_from_nearest(
 
 
 def _add_trace(db, quotation, item, field_name, formula, input_data, process_text, result_value, operator):
+    entity_type = "main"
+    entity_id = quotation.id
+    material_id = None
+    if item is not None:
+        material_id = item.id
+        if hasattr(item, "spec_detail"):
+            entity_type = "material"
+            entity_id = item.id
+        elif hasattr(item, "startup_loss_wire"):
+            entity_type = "process"
+            entity_id = item.id
     db.add(QuotationCalculationTrace(
         quotation_main_id=quotation.id,
         quotation_code=quotation.quotation_code or "",
-        material_id=item.id,
+        material_id=material_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
         calc_type="conductor",
         field_name=field_name,
         formula=formula,

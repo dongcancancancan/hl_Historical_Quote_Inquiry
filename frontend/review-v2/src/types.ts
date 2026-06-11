@@ -183,7 +183,9 @@ export interface PvcBomDetailResponse {
 export interface CalcParams {
   copper_price: string | number | null;
   copper_rod_process_fee: string | number | null;
-  vat_rate: string | number | null;
+  conductor_vat_rate?: string | number | null;
+  vat_rate?: string | number | null;
+  ul_label_fee?: string | number | null;
   transport_fee?: string | number | null;
   other_fee?: string | number | null;
   net_profit_rate?: string | number | null;

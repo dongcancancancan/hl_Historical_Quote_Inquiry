@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain
 from app.services.calculation_context import CalculationContext
+from app.services.calc_param_service import normalize_vat_rate
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
+from app.services.internal_metric_service import calculate_internal_metrics
 from app.services.quotation_summary_service import apply_quotation_summaries
 
 
@@ -45,7 +47,7 @@ def calculate_price_summary(
     irradiation_core_fee = _decimal(quotation.irradiation_core_fee)
     transport_fee = _decimal(quotation.transport_fee)
     unit_usage_sum = _round4(calculated_unit_usage_sum)
-    vat_rate = _decimal(quotation.vat_rate)
+    vat_rate = normalize_vat_rate(quotation.vat_rate) if quotation.vat_rate is not None else Decimal("0")
     operating_expense_rate = _decimal(quotation.operating_expense_rate)
     monthly_interest = _decimal(quotation.monthly_interest)
     corporate_tax_rate = _decimal(quotation.corporate_tax_rate)
@@ -89,6 +91,7 @@ def calculate_price_summary(
     quotation.final_selling_price = final_selling_price
     quotation.updater = operator
     quotation.update_time = now
+    internal_metrics = calculate_internal_metrics(quotation)
 
     db.query(QuotationCalculationTrace).filter(
         QuotationCalculationTrace.quotation_main_id == quotation.id,
@@ -181,6 +184,8 @@ def calculate_price_summary(
         "profit_selling_price": _decimal_text(profit_selling_price),
         "non_profit_price": _decimal_text(non_profit_price),
         "final_selling_price": _decimal_text(final_selling_price),
+        "material_ratio": _decimal_text(internal_metrics["material_ratio"]),
+        "order_weight": _decimal_text(internal_metrics["order_weight"]),
     }
 
 
@@ -302,6 +307,8 @@ def _add_trace(db, quotation, field_name, formula, input_data, process_text, res
         quotation_main_id=quotation.id,
         quotation_code=quotation.quotation_code or "",
         material_id=None,
+        entity_type="main",
+        entity_id=quotation.id,
         calc_type="price_summary",
         field_name=field_name,
         formula=formula,

@@ -20,6 +20,7 @@ RUN_TYPE_CALC_TYPES = {
         "jacket",
         "package_tape",
         "rewind",
+        "pair_twist",
         "collection",
     ],
     "price_summary": ["price_summary"],
@@ -32,6 +33,7 @@ RUN_TYPE_CALC_TYPES = {
         "jacket",
         "package_tape",
         "rewind",
+        "pair_twist",
         "collection",
         "price_summary",
     ],
@@ -46,6 +48,7 @@ RUN_TYPES_BY_CALC_TYPE = {
     "jacket": ["glue", "full_price"],
     "package_tape": ["glue", "full_price"],
     "rewind": ["glue", "full_price"],
+    "pair_twist": ["glue", "full_price"],
     "collection": ["glue", "full_price"],
     "price_summary": ["price_summary", "full_price"],
 }
@@ -59,6 +62,7 @@ SKILL_BY_CALC_TYPE = {
     "jacket": "glue_external_and_process",
     "package_tape": "glue_external_and_process",
     "rewind": "glue_external_and_process",
+    "pair_twist": "glue_external_and_process",
     "collection": "glue_external_and_process",
     "price_summary": "price_summary",
 }

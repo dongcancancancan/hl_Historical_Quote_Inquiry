@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.models.calculation_trace import QuotationCalculationRun, QuotationQuoteSnapshot
 from app.models.quotation import QuotationBpmInstance, QuotationMain
+from app.services.calc_param_service import normalize_vat_rate
 from app.services.calculation_run_service import latest_successful_run, mark_run_adopted
+from app.services.internal_metric_service import calculate_internal_metrics
 
 
 def create_quote_snapshot(
@@ -78,6 +80,10 @@ def build_snapshot_data(
     instance: QuotationBpmInstance,
     run: QuotationCalculationRun | None,
 ) -> dict:
+    internal_metrics = calculate_internal_metrics(quotation, instance)
+    snapshot_vat_rate = instance.vat_rate if instance.vat_rate is not None else quotation.vat_rate
+    material_ratio = instance.material_ratio if instance.material_ratio is not None else internal_metrics["material_ratio"]
+    order_weight = instance.order_weight if instance.order_weight is not None else internal_metrics["order_weight"]
     materials = sorted(
         [item for item in quotation.materials if not item.deleted],
         key=lambda item: (item.seq_no or 0, item.id or 0),
@@ -119,7 +125,7 @@ def build_snapshot_data(
             "irradiation_core_fee": quotation.irradiation_core_fee,
             "net_profit_rate": quotation.net_profit_rate,
             "customs_fee": quotation.customs_fee,
-            "vat_rate": quotation.vat_rate,
+            "vat_rate": normalize_vat_rate(snapshot_vat_rate) if snapshot_vat_rate is not None else None,
             "order_meterage": quotation.order_meterage,
             "operating_expense_rate": quotation.operating_expense_rate,
             "monthly_interest": quotation.monthly_interest,
@@ -140,7 +146,13 @@ def build_snapshot_data(
                 if instance.final_selling_price is not None
                 else quotation.final_selling_price
             ),
+            "material_ratio": material_ratio,
+            "order_weight": order_weight,
             "remark": quotation.remark or "",
+        },
+        "internal_metrics": {
+            "material_ratio": material_ratio,
+            "order_weight": order_weight,
         },
         "materials": [
             {

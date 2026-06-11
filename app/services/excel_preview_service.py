@@ -14,9 +14,13 @@ from app.models.quotation import (
     QuotationMaterial,
     QuotationProcessFee,
 )
-from app.models.calculation_trace import QuotationCalculationTrace
+from app.models.calculation_trace import QuotationCalculationRun, QuotationCalculationTrace
 from app.models.user import User
+from app.database import SessionLocal
+from app.services.bpm_instance_service import REVIEW_PARAM_FIELDS
+from app.services.calc_param_service import normalize_vat_rate
 from app.services.quotation_summary_service import apply_quotation_summaries
+from app.services.internal_metric_service import apply_internal_metrics_to_instance, calculate_internal_metrics
 from app.services.unit_price_override_service import (
     apply_unit_price_overrides,
     disable_unit_price_override,
@@ -150,6 +154,7 @@ def set_review_status(
         instance.profit_selling_price = quotation.profit_selling_price
         instance.non_profit_price = quotation.non_profit_price
         instance.final_selling_price = quotation.final_selling_price
+        apply_internal_metrics_to_instance(instance, quotation)
         instance.updater = updater
         instance.update_time = now
         db.commit()
@@ -326,6 +331,8 @@ def update_quotation_fields(
                 raise ValueError("成本分析号已存在，请使用其他编号")
 
         setattr(target, field, value)
+        if entity == "main" and instance and field in REVIEW_PARAM_FIELDS:
+            setattr(instance, field, value)
         if entity != "main":
             target.updater = updater
             target.update_time = now
@@ -403,6 +410,8 @@ def clear_material_unit_prices(
         instance.profit_selling_price = None
         instance.non_profit_price = None
         instance.final_selling_price = None
+        instance.material_ratio = None
+        instance.order_weight = None
         instance.updater = updater
         instance.update_time = now
 
@@ -463,6 +472,7 @@ def render_quotation_preview(
     quotation: QuotationMain,
     instance: QuotationBpmInstance | None = None,
     apply_unit_price_override_values: bool = True,
+    run_id: int | None = None,
 ) -> str:
     """Render a cost-analysis worksheet from structured database fields only."""
     unit_price_overrides = {}
@@ -504,6 +514,12 @@ def render_quotation_preview(
         if instance and instance.final_selling_price is not None
         else quotation.final_selling_price
     )
+    raw_display_vat_rate = quotation.vat_rate if quotation.vat_rate is not None else (instance.vat_rate if instance else None)
+    try:
+        display_vat_rate = normalize_vat_rate(raw_display_vat_rate) if raw_display_vat_rate is not None else None
+    except (ValueError, Exception):
+        display_vat_rate = None
+    internal_metrics_html = _render_internal_metrics_panel(quotation, instance)
 
     material_rows = "".join(
         _row(
@@ -618,7 +634,7 @@ def render_quotation_preview(
                 _cell("取利售价(RMB/M)", css="price-label"),
             ),
             _row(
-                _cell("其他费用", css="fee-label"),
+                _cell("其他费用(运货费)", css="fee-label"),
                 _cell("净利率", css="fee-label"),
                 _cell("报关费(RMB/次)", css="fee-label"),
                 _cell("增值税率", css="fee-label"),
@@ -630,7 +646,7 @@ def render_quotation_preview(
                 _edit_cell(quotation.other_fee, "main", quotation.id, "other_fee", css="fee-value number"),
                 _edit_cell(_percent(quotation.net_profit_rate), "main", quotation.id, "net_profit_rate", css="fee-value number", scale="percent"),
                 _edit_cell(quotation.customs_fee, "main", quotation.id, "customs_fee", css="fee-value number"),
-                _edit_cell(_percent(quotation.vat_rate), "main", quotation.id, "vat_rate", css="fee-value number", scale="percent"),
+                _edit_cell(_percent(display_vat_rate), "main", quotation.id, "vat_rate", css="fee-value number", scale="percent"),
                 _edit_cell(quotation.order_meterage, "main", quotation.id, "order_meterage", css="fee-value number"),
                 _cell("不取利售价(RMB/M)", css="price-label"),
                 _cell("最终售价(RMB/M)", css="price-label"),
@@ -658,7 +674,13 @@ def render_quotation_preview(
             ),
         ]
     )
-    return _wrap_preview_html(quotation.quotation_code or "", table_html)
+    traces = _build_trace_tooltips(
+        quotation.id,
+        bpm_instance_id=instance.id if instance else None,
+        run_id=run_id,
+    )
+    trace_json = json.dumps(traces, ensure_ascii=False)
+    return _wrap_preview_html(quotation.quotation_code or "", table_html, internal_metrics_html, trace_json)
 
 
 def render_quote_snapshot_preview(snapshot_data: dict) -> str:
@@ -671,6 +693,8 @@ def render_quote_snapshot_preview(snapshot_data: dict) -> str:
         SimpleNamespace(**{**item, "deleted": False})
         for item in (snapshot_data.get("processes") or [])
     ]
+    meta = snapshot_data.get("meta") or {}
+    snapshot_run_id = meta.get("calculation_run_id")
     quotation = SimpleNamespace(
         **main,
         materials=materials,
@@ -679,7 +703,7 @@ def render_quote_snapshot_preview(snapshot_data: dict) -> str:
         updater="",
         update_time=None,
     )
-    return render_quotation_preview(quotation, None, apply_unit_price_override_values=False)
+    return render_quotation_preview(quotation, None, apply_unit_price_override_values=False, run_id=snapshot_run_id)
 
 
 def _row(*cells: str) -> str:
@@ -727,7 +751,151 @@ def _percent(value, suffix: bool = True) -> str:
     return f"{result}%" if suffix else result
 
 
-def _wrap_preview_html(quotation_code: str, table_html: str) -> str:
+def _render_internal_metrics_panel(quotation, instance: QuotationBpmInstance | None = None) -> str:
+    metrics = calculate_internal_metrics(quotation, instance)
+    material_ratio = (
+        getattr(instance, "material_ratio", None)
+        if instance and getattr(instance, "material_ratio", None) is not None
+        else getattr(quotation, "material_ratio", None)
+    )
+    order_weight = (
+        getattr(instance, "order_weight", None)
+        if instance and getattr(instance, "order_weight", None) is not None
+        else getattr(quotation, "order_weight", None)
+    )
+    if material_ratio is None:
+        material_ratio = metrics["material_ratio"]
+    if order_weight is None:
+        order_weight = metrics["order_weight"]
+    return f"""
+    <section class="internal-metrics" aria-label="内部指标">
+        <div class="internal-metric">
+            <span>材料占比</span>
+            <strong>{html.escape(_format_percent_value(material_ratio))}</strong>
+        </div>
+        <div class="internal-metric">
+            <span>订单重量</span>
+            <strong>{html.escape(_format_weight_value(order_weight))}</strong>
+        </div>
+    </section>
+    """
+
+
+def _format_percent_value(value) -> str:
+    if value in (None, ""):
+        return "-"
+    return f"{_format_value(_decimal(value) * Decimal('100'))}%"
+
+
+def _format_weight_value(value) -> str:
+    if value in (None, ""):
+        return "-"
+    return f"{_format_value(value)} KG"
+
+
+def _build_trace_tooltips(quotation_main_id: int, bpm_instance_id: int | None = None, run_id: int | None = None) -> dict[str, dict[str, str]]:
+    """查询计算追踪记录，按 key 索引用于前端 tooltip 展示。"""
+    db = SessionLocal()
+    try:
+        if run_id:
+            run_filter = (QuotationCalculationTrace.run_id == run_id)
+        else:
+            run = _latest_calc_run(db, quotation_main_id, bpm_instance_id)
+            run_filter = (QuotationCalculationTrace.run_id == run.id) if run else None
+        if run_filter is None:
+            return {}
+        rows = (
+            db.query(QuotationCalculationTrace)
+            .filter(
+                QuotationCalculationTrace.quotation_main_id == quotation_main_id,
+                run_filter,
+            )
+            .order_by(QuotationCalculationTrace.id.desc())
+            .limit(2000)
+            .all()
+        )
+        result: dict[str, dict[str, str]] = {}
+        for row in rows:
+            entity = row.entity_type
+            entity_id = row.entity_id
+            input_data = _load_json(row.input_data)
+            if not entity:
+                process_fee_id = input_data.get("process_fee_id")
+                if row.field_name in {"process_amount", "process_subtotal_fee"} and process_fee_id:
+                    entity = "process"
+                    entity_id = _int_or_none(process_fee_id)
+                else:
+                    # 兼容旧数据：无 entity_type 时从 material_id 推断
+                    entity = "material" if row.material_id else "main"
+            if not entity_id:
+                entity_id = row.material_id or quotation_main_id
+            field = row.field_name or ""
+            steps = (row.process_text or "").strip()
+            tooltip = {
+                "f": (row.formula or "").strip(),
+                "p": steps,
+            }
+            for key in _trace_tooltip_keys(entity, entity_id, field):
+                if key in result:
+                    continue
+                result[key] = tooltip
+        return result
+    finally:
+        db.close()
+
+
+def _trace_tooltip_keys(entity: str, entity_id: int, field: str) -> list[str]:
+    keys = [f"{entity}:{entity_id}:{field}"]
+    if entity == "process":
+        aliases = {
+            "process_amount": "amount",
+            "process_subtotal_fee": "subtotal_fee",
+        }
+        alias = aliases.get(field)
+        if alias:
+            keys.append(f"{entity}:{entity_id}:{alias}")
+    return keys
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_json(raw_value: str | None) -> dict:
+    if not raw_value:
+        return {}
+    try:
+        data = json.loads(raw_value)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _latest_calc_run(db: Session, quotation_main_id: int, bpm_instance_id: int | None = None) -> QuotationCalculationRun | None:
+    query = db.query(QuotationCalculationRun).filter(
+        QuotationCalculationRun.quotation_main_id == quotation_main_id,
+        QuotationCalculationRun.status == "success",
+    )
+    if bpm_instance_id:
+        run = query.filter(QuotationCalculationRun.bpm_instance_id == bpm_instance_id).order_by(QuotationCalculationRun.id.desc()).first()
+        if run:
+            return run
+    return (
+        db.query(QuotationCalculationRun)
+        .filter(
+            QuotationCalculationRun.quotation_main_id == quotation_main_id,
+            QuotationCalculationRun.status == "success",
+        )
+        .order_by(QuotationCalculationRun.id.desc())
+        .first()
+    )
+
+
+def _wrap_preview_html(quotation_code: str, table_html: str, internal_metrics_html: str = "", trace_json: str = "{}") -> str:
+    trace_count = len(_load_json(trace_json))
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -766,13 +934,71 @@ def _wrap_preview_html(quotation_code: str, table_html: str) -> str:
         .alert {{ color: #ef0000; }}
         .sheet-input {{ width: 100%; box-sizing: border-box; padding: 1px 2px; border: 1px solid transparent; outline: none; background: transparent; color: inherit; font: inherit; text-align: inherit; }}
         .sheet-input:not(:disabled) {{ border-color: #2563eb; background: #fff; }}
+        .sheet-input.has-trace {{ cursor: help; }}
+        .sheet-input.has-trace:hover {{ background: #fef9c3 !important; }}
+        td.has-trace {{ cursor: help; }}
+        td.has-trace:hover .sheet-input {{ background: #fef9c3 !important; }}
         .cell-wrap {{ position: relative; display: flex; align-items: center; }}
         .locked-cell {{ background: #dbeafe !important; }}
         .lock-mark {{ position: absolute; right: 2px; top: 1px; color: #1d4ed8; font-size: 10px; font-family: Arial, sans-serif; }}
+        .internal-metrics {{ min-width: 1080px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }}
+        .internal-metric {{ border: 1px solid #cbd5e1; background: #fff; padding: 12px 14px; box-shadow: 0 1px 2px rgb(15 23 42 / 4%); }}
+        .internal-metric span {{ display: block; color: #64748b; font-size: 12px; }}
+        .internal-metric strong {{ display: block; margin-top: 6px; color: #111827; font-family: Consolas, monospace; font-size: 20px; }}
+        /* tooltip */
+        .trace-tooltip {{ position: fixed; z-index: 99999; max-width: 480px; padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; box-shadow: 0 10px 25px rgb(15 23 42 / 15%); font-size: 12px; line-height: 1.6; pointer-events: none; opacity: 0; transition: opacity 0.15s; }}
+        .trace-tooltip.visible {{ opacity: 1; }}
+        .trace-tooltip .tt-formula {{ display: block; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eef2f7; color: #111827; font-family: Consolas, monospace; font-size: 13px; font-weight: 600; }}
+        .trace-tooltip .tt-steps {{ white-space: pre-wrap; color: #374151; }}
     </style>
 </head>
-<body>
+<body data-trace-count="{trace_count}">
     <div class="meta">数据库实时渲染 · 成本分析号：{html.escape(quotation_code)}</div>
     <div class="sheet"><table><colgroup><col><col><col><col><col><col><col><col><col></colgroup><tbody>{table_html}</tbody></table></div>
+    {internal_metrics_html}
+    <div class="trace-tooltip" id="traceTooltip"><span class="tt-formula"></span><span class="tt-steps"></span></div>
+    <script>
+    (function() {{
+        var traces = {trace_json};
+        var tooltip = document.getElementById('traceTooltip');
+        var ff = tooltip.querySelector('.tt-formula');
+        var ss = tooltip.querySelector('.tt-steps');
+        var currentKey = null;
+
+        function show(ev, key) {{
+            if (currentKey === key) return;
+            currentKey = key;
+            var t = traces[key];
+            if (!t) {{ ff.textContent = '(无计算追踪)'; ss.textContent = ''; }}
+            else {{ ff.textContent = t.f || ''; ss.textContent = t.p || ''; }}
+            tooltip.classList.add('visible');
+            move(ev);
+        }}
+
+        function move(ev) {{
+            var x = ev.clientX + 16, y = ev.clientY - 8;
+            if (x + 490 > window.innerWidth) x = ev.clientX - 500;
+            if (y + 200 > window.innerHeight) y = ev.clientY - 210;
+            tooltip.style.left = x + 'px';
+            tooltip.style.top = y + 'px';
+        }}
+
+        function hide() {{
+            currentKey = null;
+            tooltip.classList.remove('visible');
+        }}
+
+        document.querySelectorAll('.sheet-input').forEach(function(el) {{
+            var key = (el.dataset.entity || '') + ':' + (el.dataset.id || '') + ':' + (el.dataset.field || '');
+            if (!traces[key]) return;
+            var hoverTarget = el.closest('td') || el.parentElement || el;
+            el.classList.add('has-trace');
+            hoverTarget.classList.add('has-trace');
+            hoverTarget.addEventListener('mouseenter', function(ev) {{ show(ev, key); }});
+            hoverTarget.addEventListener('mousemove', move);
+            hoverTarget.addEventListener('mouseleave', hide);
+        }});
+    }})();
+    </script>
 </body>
 </html>"""

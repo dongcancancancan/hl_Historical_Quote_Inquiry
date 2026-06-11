@@ -5,16 +5,12 @@
         <strong>计算状态</strong>
         <p>{{ selectedCode ? selectedCode : "选择报价单后查看计算状态" }}</p>
       </div>
-      <el-button size="small" type="primary" plain @click="$emit('diagnose')">
-        {{ diagnosis?.mode === "llm" ? "重新 AI 分析" : "AI 辅助分析" }}
-      </el-button>
     </div>
     <el-scrollbar class="diagnosis-body">
-      <div v-if="loading" class="diagnosis-loading">AI 分析中，请稍候...</div>
-      <el-empty v-else-if="!selectedCode" description="暂无计算状态" :image-size="68" />
+      <el-empty v-if="!selectedCode" description="暂无计算状态" :image-size="68" />
       <div v-else-if="!diagnosis" class="diagnosis-placeholder">
         <el-alert title="还没有计算异常。计算失败后这里会直接展示规则提示。" type="info" :closable="false" />
-        <p>系统默认不调用 AI；只有点击“AI 辅助分析”时，才会调用一次辅助分析服务。</p>
+        <p>批量计算失败时，请回到对应成本分析表查看这里的规则提示。</p>
       </div>
       <div v-else class="diagnosis-result">
         <div class="diagnosis-card">
@@ -57,16 +53,13 @@ import type { DiagnosisResult } from "../types";
 const props = defineProps<{
   selectedCode: string;
   diagnosis: DiagnosisResult | null;
-  loading: boolean;
 }>();
 
 defineEmits<{
-  diagnose: [];
   skills: [];
 }>();
 
 const modeText = computed(() => {
-  if (props.diagnosis?.mode === "llm") return "AI 辅助分析";
   if (props.diagnosis?.mode === "local") return "前端即时提示";
   return "规则异常提示";
 });

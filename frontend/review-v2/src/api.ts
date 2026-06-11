@@ -6,7 +6,6 @@ import type {
   CopperFeeMatchResponse,
   CopperFeePayload,
   CopperScenarioResponse,
-  DiagnosisResult,
   RoutePlanTestResponse,
   RoutingTestPayload,
   RoutingTestResponse,
@@ -155,6 +154,7 @@ export async function batchSaveCalcParams(data: {
   copper_price: string | number | null;
   copper_rod_process_fee: string | number | null;
   vat_rate: string | number | null;
+  ul_label_fee?: string | number | null;
   transport_fee?: string | number | null;
   other_fee?: string | number | null;
   net_profit_rate?: string | number | null;
@@ -350,19 +350,6 @@ export async function fetchSkills(): Promise<SkillItem[]> {
   return data.items || [];
 }
 
-export async function diagnose(
-  code: string,
-  instanceId: number | null | undefined,
-  errorMessage = "",
-): Promise<DiagnosisResult> {
-  const res = await fetch(`${API_ROOT}/quotation/calculate/diagnose?${selectedQuery(code, instanceId)}`, {
-    method: "POST",
-    headers: headers(true),
-    body: JSON.stringify({ error_message: errorMessage }),
-  });
-  return parseJson<DiagnosisResult>(res);
-}
-
 export async function routeTest(
   code: string,
   instanceId: number | null | undefined,
@@ -460,11 +447,22 @@ export async function exportExcel(code: string, instanceId?: number | null): Pro
   URL.revokeObjectURL(url);
 }
 
-export async function exportBatchQuote(instanceIds: number[]): Promise<void> {
+export async function fetchBatchQuoteTemplates(): Promise<Array<{
+  id: string;
+  name: string;
+  filename: string;
+  description?: string;
+}>> {
+  const res = await fetch(`${API_ROOT}/quotation/export-batch-quote/templates`, { headers: headers() });
+  const data = await parseJson<{ items: Array<{ id: string; name: string; filename: string; description?: string }> }>(res);
+  return data.items || [];
+}
+
+export async function exportBatchQuote(instanceIds: number[], templateId = "general_quote_xls"): Promise<void> {
   const res = await fetch(`${API_ROOT}/quotation/export-batch-quote`, {
     method: "POST",
     headers: headers(true),
-    body: JSON.stringify({ instance_ids: instanceIds }),
+    body: JSON.stringify({ instance_ids: instanceIds, template_id: templateId }),
   });
   if (!res.ok) {
     const data = await res.json();
@@ -473,7 +471,7 @@ export async function exportBatchQuote(instanceIds: number[]): Promise<void> {
   const url = URL.createObjectURL(await res.blob());
   const link = document.createElement("a");
   link.href = url;
-  link.download = parseDownloadFilename(res.headers.get("Content-Disposition")) || "报价单.xls";
+  link.download = parseDownloadFilename(res.headers.get("Content-Disposition")) || "报价单.xlsx";
   link.click();
   URL.revokeObjectURL(url);
 }

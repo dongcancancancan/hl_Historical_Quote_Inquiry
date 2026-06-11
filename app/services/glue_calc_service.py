@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.calculation_trace import QuotationCalculationTrace
 from app.models.quotation import QuotationMain, QuotationMaterial
 from app.services.calculation_context import CalculationContext
-from app.services.conductor_calc_service import _is_conductor_row
+from app.services.conductor_calc_service import _is_conductor_row, refresh_braiding_process_fees
 from app.services.excel_preview_service import REVIEW_QUOTED, get_review_status
 from app.services.unit_price_override_service import apply_unit_price_overrides, has_unit_price_override, load_unit_price_overrides
 
@@ -23,6 +23,7 @@ GLUE_CALC_TYPES = [
     "jacket",
     "package_tape",
     "rewind",
+    "pair_twist",
     "collection",
 ]
 
@@ -53,9 +54,10 @@ def calculate_glue_materials(
     ]
     package_tape_processes = [item for item in quotation.processes if not item.deleted and _is_package_tape_process(item)]
     rewind_processes = [item for item in quotation.processes if not item.deleted and _is_rewind_process(item)]
+    pair_twist_processes = [item for item in quotation.processes if not item.deleted and _is_pair_twist_process(item)]
     collection_processes = [item for item in quotation.processes if not item.deleted and _is_collection_process(item)]
-    if not candidates and not package_tape_processes and not rewind_processes and not collection_processes:
-        raise ValueError("未找到可计算的 C 开头胶料、外购物料、外被、包带、倒线或集合制程行")
+    if not candidates and not package_tape_processes and not rewind_processes and not pair_twist_processes and not collection_processes:
+        raise ValueError("未找到可计算的 C 开头胶料、外购物料、外被、包带、倒线、对绞或集合制程行")
 
     calculated = 0
     c_calculated = 0
@@ -66,9 +68,11 @@ def calculate_glue_materials(
     jacket_process_calculated = 0
     package_tape_process_calculated = 0
     rewind_process_calculated = 0
+    pair_twist_process_calculated = 0
     collection_process_calculated = 0
     skipped = []
     hard_errors = []
+    used_insulation_process_ids: set[int] = set()
     now = datetime.now()
 
     db.query(QuotationCalculationTrace).filter(
@@ -133,7 +137,7 @@ def calculate_glue_materials(
         if material_calculated:
             calculated += 1
         if _is_insulation_row(item):
-            ok, error = _calculate_insulation_process_fee(db, quotation, item, operator, now, ctx)
+            ok, error = _calculate_insulation_process_fee(db, quotation, item, operator, now, ctx, used_insulation_process_ids)
             if ok:
                 insulation_process_calculated += 1
             elif error:
@@ -160,6 +164,13 @@ def calculate_glue_materials(
         elif error:
             hard_errors.append(error)
 
+    for process in pair_twist_processes:
+        ok, error = _calculate_pair_twist_process_fee(db, quotation, process, operator, now, ctx)
+        if ok:
+            pair_twist_process_calculated += 1
+        elif error:
+            hard_errors.append(error)
+
     for process in collection_processes:
         ok, error = _calculate_collection_process_fee(db, quotation, process, operator, now, ctx)
         if ok:
@@ -167,13 +178,24 @@ def calculate_glue_materials(
         elif error:
             hard_errors.append(error)
 
+    braiding_process_refreshed = refresh_braiding_process_fees(
+        db,
+        quotation,
+        operator,
+        now=now,
+        ctx=ctx,
+        replace_existing_traces=True,
+    )
+
     has_partial_result = (
         calculated > 0
         or insulation_process_calculated > 0
         or jacket_process_calculated > 0
         or package_tape_process_calculated > 0
         or rewind_process_calculated > 0
+        or pair_twist_process_calculated > 0
         or collection_process_calculated > 0
+        or braiding_process_refreshed > 0
     )
     if (
         calculated == 0
@@ -181,9 +203,11 @@ def calculate_glue_materials(
         and jacket_process_calculated == 0
         and package_tape_process_calculated == 0
         and rewind_process_calculated == 0
+        and pair_twist_process_calculated == 0
         and collection_process_calculated == 0
+        and braiding_process_refreshed == 0
     ):
-        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、包带、倒线或集合制程行"
+        message = "；".join(item["reason"] for item in skipped) or "没有可计算的胶料、外购物料、外被、包带、倒线、对绞或集合制程行"
         raise ValueError(message)
     if hard_errors:
         if has_partial_result:
@@ -215,7 +239,9 @@ def calculate_glue_materials(
         "jacket_process_calculated": jacket_process_calculated,
         "package_tape_process_calculated": package_tape_process_calculated,
         "rewind_process_calculated": rewind_process_calculated,
+        "pair_twist_process_calculated": pair_twist_process_calculated,
         "collection_process_calculated": collection_process_calculated,
+        "braiding_process_refreshed": braiding_process_refreshed,
         "skipped": skipped,
     }
 
@@ -444,8 +470,9 @@ def _calculate_insulation_process_fee(
     operator: str,
     now: datetime,
     ctx: CalculationContext | None = None,
+    used_process_ids: set[int] | None = None,
 ) -> tuple[bool, str]:
-    process = _match_insulation_process_fee_row(quotation, item)
+    process = _match_insulation_process_fee_row(quotation, item, used_process_ids)
     if not process:
         return False, f"未找到绝缘/芯押对应的制程费用行：{item.process_name or ''}"
 
@@ -469,6 +496,8 @@ def _calculate_insulation_process_fee(
     process.subtotal_fee = subtotal_fee
     process.updater = operator
     process.update_time = now
+    if used_process_ids is not None and process.id:
+        used_process_ids.add(process.id)
     if ctx:
         ctx.mark_process(process.id, "insulation")
 
@@ -743,6 +772,118 @@ def _calculate_rewind_process_fee(
     return True, ""
 
 
+def _calculate_pair_twist_process_fee(
+    db: Session,
+    quotation: QuotationMain,
+    process,
+    operator: str,
+    now: datetime,
+    ctx: CalculationContext | None = None,
+) -> tuple[bool, str]:
+    amounts = _pair_twist_material_amounts(quotation, ctx)
+    if amounts["error"]:
+        return False, str(amounts["error"])
+    material_amount_sum = amounts["total"]
+    if material_amount_sum <= 0:
+        return False, "对绞制程计算需要先计算铜绞/导体和芯押材料金额"
+
+    startup_loss_wire = Decimal(process.startup_loss_wire or 0)
+    fixed_fee = Decimal(process.fixed_fee or 0)
+    startup_times = Decimal(quotation.order_startup_times or 0)
+
+    process_amount = _round4(startup_loss_wire * material_amount_sum)
+    subtotal_fee = _round4(fixed_fee + process_amount * startup_times)
+
+    process.amount = process_amount
+    process.subtotal_fee = subtotal_fee
+    process.updater = operator
+    process.update_time = now
+    if ctx:
+        ctx.mark_process(process.id, "pair_twist")
+
+    mode = amounts["mode"]
+    copper_part = amounts["copper_part"]
+    insulation_part = amounts["insulation_part"]
+    jacket_fb = amounts.get("jacket_fallback")
+    insulation_label = "外被(芯押)" if jacket_fb else "芯押"
+    if mode == "p_suffix_both":
+        mode_text = f"P结尾铜绞 + P结尾{insulation_label}"
+        formula = f"对绞金额 = 开机损耗废线 × (P结尾铜绞/导体材料金额 + P结尾{insulation_label}材料金额)"
+        material_formula_text = (
+            f"P结尾铜绞/导体 {amounts['p_suffix_copper_amount']} + "
+            f"P结尾{insulation_label} {amounts['p_suffix_insulation_amount']}"
+        )
+    elif mode == "p_suffix_copper":
+        mode_text = f"P结尾铜绞 + 全部{insulation_label}"
+        formula = f"对绞金额 = 开机损耗废线 × (P结尾铜绞/导体材料金额 + 全部{insulation_label}材料金额)"
+        material_formula_text = (
+            f"P结尾铜绞/导体 {amounts['p_suffix_copper_amount']} + "
+            f"全部{insulation_label} {amounts['all_insulation_amount']}"
+        )
+    elif mode == "p_suffix_insulation":
+        mode_text = f"全部铜绞 + P结尾{insulation_label}"
+        formula = f"对绞金额 = 开机损耗废线 × (全部铜绞/导体材料金额 + P结尾{insulation_label}材料金额)"
+        material_formula_text = (
+            f"全部铜绞/导体 {amounts['all_copper_amount']} + "
+            f"P结尾{insulation_label} {amounts['p_suffix_insulation_amount']}"
+        )
+    else:
+        mode_text = f"全部铜绞/导体与{insulation_label}材料"
+        formula = f"对绞金额 = 开机损耗废线 × (全部铜绞/导体材料金额 + 全部{insulation_label}材料金额)"
+        material_formula_text = (
+            f"全部铜绞/导体 {amounts['all_copper_amount']} + "
+            f"全部{insulation_label} {amounts['all_insulation_amount']}"
+        )
+    input_data = {
+        "process_fee_id": process.id,
+        "process_fee_name": process.process_name,
+        "mode": mode,
+        "mode_text": mode_text,
+        "copper_part": str(copper_part),
+        "insulation_part": str(insulation_part),
+        "p_suffix_copper_amount": str(amounts["p_suffix_copper_amount"]),
+        "p_suffix_insulation_amount": str(amounts["p_suffix_insulation_amount"]),
+        "all_copper_amount": str(amounts["all_copper_amount"]),
+        "all_insulation_amount": str(amounts["all_insulation_amount"]),
+        "pair_twist_material_amount_sum": str(material_amount_sum),
+        "startup_loss_wire": str(startup_loss_wire),
+        "fixed_fee": str(fixed_fee),
+        "startup_times": str(startup_times),
+        "startup_times_source": "quotation_main.order_startup_times",
+    }
+    process_text = (
+        f"匹配对绞制程费用行：{process.process_name or ''}\n"
+        f"参与材料金额（{mode_text}）= {material_formula_text} = {material_amount_sum}\n"
+        f"金额 = 开机损耗废线 {startup_loss_wire} × 参与材料金额 {material_amount_sum} = {process_amount}\n"
+        f"费用成本小计 = 固定费用 {fixed_fee} + 金额 {process_amount} × 订单开机次数 {startup_times} = {subtotal_fee}"
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_amount",
+        formula,
+        input_data,
+        process_text,
+        process_amount,
+        operator,
+        "pair_twist",
+    )
+    _add_trace(
+        db,
+        quotation,
+        None,
+        "process_subtotal_fee",
+        "对绞费用成本小计 = 固定费用 + 金额 × 订单开机次数",
+        input_data,
+        process_text,
+        subtotal_fee,
+        operator,
+        "pair_twist",
+    )
+    return True, ""
+
+
 def _calculate_collection_process_fee(
     db: Session,
     quotation: QuotationMain,
@@ -1013,9 +1154,18 @@ def _is_core_conductor_row(item: QuotationMaterial) -> bool:
     )
 
 
-def _match_insulation_process_fee_row(quotation: QuotationMain, material: QuotationMaterial):
+def _match_insulation_process_fee_row(
+    quotation: QuotationMain,
+    material: QuotationMaterial,
+    used_process_ids: set[int] | None = None,
+):
     material_name = _normalize_process_name(material.process_name)
-    processes = [item for item in quotation.processes if not item.deleted]
+    used_process_ids = used_process_ids or set()
+    processes = [
+        item for item in quotation.processes
+        if not item.deleted and (not item.id or item.id not in used_process_ids)
+    ]
+    processes.sort(key=lambda item: item.id or 0)
     if material_name:
         for process in processes:
             if _normalize_process_name(process.process_name) == material_name:
@@ -1057,6 +1207,11 @@ def _is_package_tape_process(process) -> bool:
 def _is_rewind_process(process) -> bool:
     name = str(process.process_name or "")
     return "倒线" in name
+
+
+def _is_pair_twist_process(process) -> bool:
+    name = str(process.process_name or "")
+    return "对绞" in name
 
 
 def _is_collection_process(process) -> bool:
@@ -1112,6 +1267,117 @@ def _jacket_material_amount_sum(quotation: QuotationMain, ctx: CalculationContex
     ))
 
 
+def _pair_twist_material_amounts(
+    quotation: QuotationMain,
+    ctx: CalculationContext | None = None,
+) -> dict[str, Decimal | str | None]:
+    p_suffix_copper_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item) and _spec_ends_with_p(item)
+    ]
+    p_suffix_insulation_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_insulation_row(item) and _spec_ends_with_p(item)
+    ]
+    all_copper_amount = _material_amount_by_matcher(quotation, _is_core_conductor_row, ctx)
+    all_insulation_amount = _material_amount_by_matcher(quotation, _is_insulation_row, ctx)
+    # 无芯押时回退到外被：外被在最后一行且之前无芯押制程时，外被即是芯押
+    jacket_fallback = all_insulation_amount <= 0
+    if jacket_fallback:
+        all_insulation_amount = _material_amount_by_matcher(quotation, _is_jacket_row, ctx)
+        # P结尾外被也视为 P结尾芯押
+        p_suffix_insulation_rows = [
+            item for item in quotation.materials
+            if not item.deleted and _is_jacket_row(item) and _spec_ends_with_p(item)
+        ]
+    p_suffix_copper_amount = _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in p_suffix_copper_rows
+        if ctx is None or item.id in ctx.calculated_material_ids
+    ))
+    p_suffix_insulation_amount = _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in p_suffix_insulation_rows
+        if ctx is None or item.id in ctx.calculated_material_ids
+    ))
+
+    error = None
+    has_p_copper = bool(p_suffix_copper_rows)
+    has_p_insulation = bool(p_suffix_insulation_rows)
+
+    if has_p_copper and has_p_insulation:
+        # 两边都有 P结尾 → 都取 P结尾
+        mode = "p_suffix_both"
+        copper_part = p_suffix_copper_amount
+        insulation_part = p_suffix_insulation_amount
+        if copper_part <= 0 and insulation_part <= 0:
+            error = "对绞制程需要先计算 P结尾铜绞/导体和 P结尾芯押的材料金额"
+        elif copper_part <= 0:
+            error = "对绞制程需要先计算 P结尾铜绞/导体的材料金额"
+        elif insulation_part <= 0:
+            error = "对绞制程需要先计算 P结尾芯押的材料金额"
+    elif has_p_copper:
+        # 仅铜绞有 P结尾 → P结尾铜绞 + 全部芯押
+        mode = "p_suffix_copper"
+        copper_part = p_suffix_copper_amount
+        insulation_part = all_insulation_amount
+        if copper_part <= 0:
+            error = "对绞制程需要先计算 P结尾铜绞/导体的材料金额"
+        elif insulation_part <= 0:
+            error = "对绞制程需要先计算芯押材料金额"
+    elif has_p_insulation:
+        # 仅芯押有 P结尾 → 全部铜绞 + P结尾芯押
+        mode = "p_suffix_insulation"
+        copper_part = all_copper_amount
+        insulation_part = p_suffix_insulation_amount
+        if copper_part <= 0:
+            error = "对绞制程需要先计算铜绞/导体的材料金额"
+        elif insulation_part <= 0:
+            error = "对绞制程需要先计算 P结尾芯押的材料金额"
+    else:
+        # 都没有 P结尾 → 全部铜绞 + 全部芯押
+        mode = "all_core"
+        copper_part = all_copper_amount
+        insulation_part = all_insulation_amount
+        if copper_part <= 0 or insulation_part <= 0:
+            error = "对绞制程计算需要先计算全部铜绞/导体和芯押材料金额"
+
+    total = _round4(copper_part + insulation_part)
+    return {
+        "mode": mode,
+        "jacket_fallback": jacket_fallback,
+        "p_suffix_copper_amount": p_suffix_copper_amount,
+        "p_suffix_insulation_amount": p_suffix_insulation_amount,
+        "all_copper_amount": all_copper_amount,
+        "all_insulation_amount": all_insulation_amount,
+        "copper_part": copper_part,
+        "insulation_part": insulation_part,
+        "total": total,
+        "error": error,
+    }
+
+
+def _material_amount_by_matcher(
+    quotation: QuotationMain,
+    matcher,
+    ctx: CalculationContext | None = None,
+) -> Decimal:
+    return _round4(sum(
+        Decimal(item.material_amount or 0)
+        for item in quotation.materials
+        if not item.deleted
+        and (ctx is None or item.id in ctx.calculated_material_ids)
+        and matcher(item)
+    ))
+
+
+def _spec_ends_with_p(item: QuotationMaterial) -> bool:
+    spec = str(item.spec_detail or "").strip()
+    if not spec:
+        return False
+    return bool(re.search(r"p\s*$", spec, re.IGNORECASE))
+
+
 def _collection_material_amounts(
     quotation: QuotationMain,
     ctx: CalculationContext | None = None,
@@ -1162,10 +1428,23 @@ def _missing_collection_amount_message(quotation: QuotationMain, label: str, mat
 
 
 def _add_trace(db, quotation, item, field_name, formula, input_data, process_text, result_value, operator, calc_type: str):
+    entity_type = "main"
+    entity_id = quotation.id
+    material_id = None
+    if item is not None:
+        material_id = item.id
+        if hasattr(item, "spec_detail"):
+            entity_type = "material"
+            entity_id = item.id
+        elif hasattr(item, "startup_loss_wire"):
+            entity_type = "process"
+            entity_id = item.id
     db.add(QuotationCalculationTrace(
         quotation_main_id=quotation.id,
         quotation_code=quotation.quotation_code or "",
-        material_id=item.id if item is not None else None,
+        material_id=material_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
         calc_type=calc_type,
         field_name=field_name,
         formula=formula,
