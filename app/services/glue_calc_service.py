@@ -1539,13 +1539,21 @@ def _is_jacket_row(item: QuotationMaterial, quotation: QuotationMain | None = No
 
 
 def _is_last_insulation_material(item: QuotationMaterial, quotation: QuotationMain | None = None) -> bool:
-    if quotation is None or not _is_insulation_row(item):
+    if quotation is None or not _is_insulation_row(item) or not _last_process_is_jacket(quotation):
         return False
     active_materials = [row for row in quotation.materials if not row.deleted]
     if not active_materials:
         return False
     active_materials.sort(key=lambda row: (row.seq_no if row.seq_no is not None else 10**9, row.id or 0))
     return active_materials[-1].id == item.id
+
+
+def _last_process_is_jacket(quotation: QuotationMain) -> bool:
+    active_processes = [row for row in quotation.processes if not row.deleted]
+    if not active_processes:
+        return False
+    active_processes.sort(key=lambda row: row.id or 0)
+    return _is_jacket_process(active_processes[-1])
 
 
 def _is_core_conductor_row(item: QuotationMaterial) -> bool:
@@ -1635,6 +1643,10 @@ def _conductor_material_amount_before(
     insulation_item: QuotationMaterial,
     ctx: CalculationContext | None = None,
 ) -> Decimal:
+    paired_amount = _paired_conductor_material_amount_for_insulation(quotation, insulation_item, ctx)
+    if paired_amount is not None:
+        return paired_amount
+
     insulation_seq = insulation_item.seq_no or 0
     candidates = [
         item for item in quotation.materials
@@ -1653,6 +1665,32 @@ def _conductor_material_amount_before(
             and _is_core_conductor_row(item)
         ]
     return _round4(sum(Decimal(item.material_amount or 0) for item in candidates))
+
+
+def _paired_conductor_material_amount_for_insulation(
+    quotation: QuotationMain,
+    insulation_item: QuotationMaterial,
+    ctx: CalculationContext | None = None,
+) -> Decimal | None:
+    conductor_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_core_conductor_row(item)
+    ]
+    insulation_rows = [
+        item for item in quotation.materials
+        if not item.deleted and _is_insulation_row(item) and not _is_jacket_row(item, quotation)
+    ]
+    if len(conductor_rows) <= 1 or len(insulation_rows) <= 1:
+        return None
+    conductor_rows.sort(key=lambda item: (item.seq_no if item.seq_no is not None else 10**9, item.id or 0))
+    insulation_rows.sort(key=lambda item: (item.seq_no if item.seq_no is not None else 10**9, item.id or 0))
+    index = next((idx for idx, item in enumerate(insulation_rows) if item.id == insulation_item.id), None)
+    if index is None or index >= len(conductor_rows):
+        return None
+    conductor = conductor_rows[index]
+    if ctx is not None and conductor.id not in ctx.calculated_material_ids:
+        return Decimal("0")
+    return _round4(Decimal(conductor.material_amount or 0))
 
 
 def _material_amount_sum(quotation: QuotationMain, ctx: CalculationContext | None = None) -> Decimal:

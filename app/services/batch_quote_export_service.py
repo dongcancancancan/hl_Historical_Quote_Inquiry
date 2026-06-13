@@ -18,7 +18,6 @@ from app.models.quotation import QuotationBpmInstance, QuotationMain
 from app.services.bpm_instance_service import REVIEW_PARAM_FIELDS
 from app.services.calc_param_service import DEFAULT_COPPER_ROD_PROCESS_FEE, DEFAULT_VAT_RATE, normalize_vat_multiplier, normalize_vat_rate
 from app.services.copper_scenario_service import _calculate_one_band
-from app.services.glue_calc_service import _is_jacket_row
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 GENERAL_TEMPLATE_PATH = PROJECT_ROOT / "通用报价单格式.xlsx"
@@ -131,7 +130,7 @@ def _get_quote_template(template_id: str | None) -> dict:
 
 def _build_export_row(db: Session, quotation: QuotationMain, instance: QuotationBpmInstance) -> dict:
     band_results = _calculate_template_bands(db, quotation, instance)
-    jacket_row = _find_jacket_material(quotation)
+    jacket_row = _find_export_material(quotation)
     return {
         "quotation_code": quotation.quotation_code or "",
         "product_spec": quotation.product_spec or "",
@@ -185,11 +184,12 @@ def _restore_review_values(quotation: QuotationMain, values: dict) -> None:
         setattr(quotation, field, value)
 
 
-def _find_jacket_material(quotation: QuotationMain):
-    for item in quotation.materials:
-        if not item.deleted and _is_jacket_row(item, quotation):
-            return item
-    return None
+def _find_export_material(quotation: QuotationMain):
+    materials = [item for item in quotation.materials if not item.deleted]
+    if not materials:
+        return None
+    materials.sort(key=lambda item: (item.seq_no if item.seq_no is not None else 10**9, item.id or 0))
+    return materials[-1]
 
 
 def _build_product_name(quotation: QuotationMain, jacket_row) -> str:
@@ -216,8 +216,6 @@ def _outer_material_name(jacket_row) -> str:
     if code.startswith("C"):
         return "低毒PVC外被"
     name = str(getattr(jacket_row, "process_name", "") or "").strip()
-    if "芯押" in name:
-        return "外被"
     return name or "外被"
 
 
@@ -283,7 +281,10 @@ def _render_workbook_from_template(
         searched = "；".join(str(item) for item in _template_path_candidates(template))
         raise ValueError(f"未找到报价单模板：{template_path}；已搜索路径：{searched}")
 
-    workbook = load_workbook(template_path)
+    try:
+        workbook = load_workbook(template_path)
+    except Exception as exc:
+        raise ValueError(f"无法打开报价单模板：{template_path}（{exc}）") from exc
     if template["sheet_name"] not in workbook.sheetnames:
         raise ValueError(f"报价单模板中未找到工作表：{template['sheet_name']}")
     sheet = workbook[template["sheet_name"]]

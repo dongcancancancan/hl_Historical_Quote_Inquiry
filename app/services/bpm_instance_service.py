@@ -277,7 +277,7 @@ def update_instance_calc_params(
     if instance:
         instance.copper_price = params.copper_price
         instance.copper_rod_process_fee = params.copper_rod_process_fee
-        if "vat_rate" in data:
+        if "vat_rate" in data and data.get("vat_rate") is not None:
             instance.vat_rate = normalize_vat_rate(data.get("vat_rate"))
         _apply_review_params_to_instance(instance, quotation, data)
         instance.updater = operator

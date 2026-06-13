@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(Start-Sleep -Seconds 3)",
+      "Bash(curl -s http://127.0.0.1:8765/health)",
+      "Bash(curl -s http://127.0.0.1:8765/api/v1/etl/history)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'history keys: {list\\(d.keys\\(\\)\\)}'\\)\")",
+      "Bash(curl -s -X POST http://127.0.0.1:8765/api/v1/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"EG253100\",\"password\":\"123456\",\"tenant_code\":\"reviewer\"}')",
+      "Bash(python -m py_compile app/services/bpm_instance_service.py)",
+      "Bash(python -m py_compile app/services/batch_quote_export_service.py)"
     ]
   }
 }
